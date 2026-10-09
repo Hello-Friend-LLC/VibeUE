@@ -280,6 +280,7 @@ Sample scripts under `scripts/` are **runnable examples** — edit the variables
 | Create a Widget Blueprint | `workflows.md` → Create Widget Blueprint | `scripts/create_widget.txt` |
 | Script/C++ base class first, then the WBP extends it (BindWidget tree, verify lineage) | `script-base-first.md` | `scripts/create_widget_from_script_base.txt` |
 | Reparent a legacy WBP onto a script base / ListView entry rows | `script-base-first.md` → §5, §6 | — |
+| Implement a whole UI screen end to end (design ref -> material plan -> AS base -> WBP -> verify) | `screen-process.md` | — |
 | Drive a widget's look/state with a UI material (instance vs master, state animation, fill) | `ui-materials.md` → §1-§4 | — |
 | Inspect widget animations / material params from Python | `ui-materials.md` → §5 | — |
 | Port an existing WBP family into a new folder (copy + class remap + anim rename) | `ui-materials.md` → §6; `script-base-first.md` → §5 | — |
@@ -313,6 +314,9 @@ loader that exposes this skill; there is no `vibeue-skills-manager` tool):
   template with BindWidget members, creating the WBP with that parent, BindWidget tree rules,
   compile/lineage verification, reparenting legacy WBPs, ListView entry rows, hot-reload traps,
   and a review checklist for existing script widgets.
+- **`screen-process.md`** — the one end-to-end "implement a UI screen" process: element list, material/instance
+  plan, AS base, WBP creation, verification ladder (compile, lineage, preview, PIE captures at 3 resolutions x 5
+  states, parity diff), staging, review checklist, with the WI-1548 port as worked example.
 - **`ui-materials.md`** — UI-domain material patterns: when a material beats a brush, master vs instance rule,
   WBP animations keying one state scalar (`BindWidgetAnim` members, one writer, rest pose), script-driven fill
   values, Python inspection recipes (animations, material params), the copy/remap route for porting a WBP
