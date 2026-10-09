@@ -21,6 +21,10 @@ struct FWidgetInfo
 	UPROPERTY(BlueprintReadWrite, Category = "Widget")
 	FString WidgetClass;
 
+	/** Full class path (GetClass()->GetPathName()), e.g. /Game/UI/WBP_X.WBP_X_C. WidgetClass above is the bare class name only. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FString WidgetClassPath;
+
 	UPROPERTY(BlueprintReadWrite, Category = "Widget")
 	FString ParentWidget;
 
@@ -130,6 +134,10 @@ struct FWidgetComponentSnapshot
 	UPROPERTY(BlueprintReadWrite, Category = "Widget")
 	FString WidgetClass;
 
+	/** Full class path (GetClass()->GetPathName()), e.g. /Game/UI/WBP_X.WBP_X_C. WidgetClass above is the bare class name only. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FString WidgetClassPath;
+
 	UPROPERTY(BlueprintReadWrite, Category = "Widget")
 	FString ParentWidget;
 
@@ -231,6 +239,46 @@ struct FWidgetRemoveComponentResult
 
 	UPROPERTY(BlueprintReadWrite, Category = "Widget")
 	FString ErrorMessage;
+};
+
+/**
+ * Result of UWidgetService::ReplaceWidgetClass.
+ * NamedSlotsBefore/After are "SlotName=ContentWidgetName" entries (ContentWidgetName is "<empty>" for an unfilled slot);
+ * they are only populated when the replaced widget is a UserWidget host (INamedSlotInterface).
+ */
+USTRUCT(BlueprintType)
+struct FWidgetReplaceClassResult
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	bool bSuccess = false;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FString ErrorMessage;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FString OldClassPath;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FString NewClassPath;
+
+	/** Class name of the panel slot before / after (e.g. VerticalBoxSlot); the slot is expected to be kept. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FString SlotClassBefore;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FString SlotClassAfter;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	TArray<FString> NamedSlotsBefore;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	TArray<FString> NamedSlotsAfter;
+
+	/** True when every named slot that held content before still holds a widget of the same name after the replace. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	bool bNamedSlotContentSurvived = false;
 };
 
 /**
@@ -644,6 +692,29 @@ public:
 		const FString& WidgetPath,
 		const FString& OldName,
 		const FString& NewName);
+
+	/**
+	 * Replace a widget instance in the tree with an instance of a different widget class,
+	 * keeping its panel slot (wraps FWidgetBlueprintOperationUtils::ReplaceWidgetWithTemplate).
+	 * Use this to point a duplicated page's child UserWidget instances at a copied component
+	 * WBP. For a UserWidget host the result reports whether NamedSlot content survived.
+	 * Python: unreal.WidgetService.replace_widget_class(WidgetPath, WidgetName, NewClassPath)
+	 *
+	 * @param WidgetPath - Full path to the Widget Blueprint holding the widget
+	 * @param WidgetName - Name of the widget instance to replace (name is kept)
+	 * @param NewClassPath - FULL class path, e.g. "/Game/UI/MaterialLab/WBP_X.WBP_X_C" or "/Script/UMG.Border";
+	 *                       never a bare asset name
+	 * @param bKeepNamedSlotContent - Engine replace deletes the old host's NamedSlot content; when true
+	 *                       (default) the content is detached first and re-attached to the same-named
+	 *                       slot on the new host (dropped, and reported, if the new class lacks the slot)
+	 * @return Result with old/new class paths and NamedSlot survival
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Widgets")
+	static FWidgetReplaceClassResult ReplaceWidgetClass(
+		const FString& WidgetPath,
+		const FString& WidgetName,
+		const FString& NewClassPath,
+		bool bKeepNamedSlotContent = true);
 
 	/**
 	 * Move an existing widget to a new parent panel (re-parent), preserving the widget object.

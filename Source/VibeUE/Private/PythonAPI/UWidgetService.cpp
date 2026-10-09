@@ -2,6 +2,8 @@
 
 #include "PythonAPI/UWidgetService.h"
 #include "WidgetBlueprint.h"
+#include "WidgetBlueprintOperationUtils.h"
+#include "Components/NamedSlotInterface.h"
 #include "EditorAssetLibrary.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
@@ -1447,6 +1449,7 @@ TArray<FWidgetInfo> UWidgetService::GetHierarchy(const FString& WidgetPath)
 		FWidgetInfo Info;
 		Info.WidgetName = Widget->GetName();
 		Info.WidgetClass = Widget->GetClass()->GetName();
+		Info.WidgetClassPath = Widget->GetClass()->GetPathName();
 		Info.bIsRootWidget = (Widget == RootWidget);
 		Info.bIsVariable = Widget->bIsVariable;
 		InfoMap.Add(Info.WidgetName, Info);
@@ -1549,6 +1552,7 @@ TArray<FWidgetInfo> UWidgetService::ListComponents(const FString& WidgetPath)
 		FWidgetInfo Info;
 		Info.WidgetName = Widget->GetName();
 		Info.WidgetClass = Widget->GetClass()->GetName();
+		Info.WidgetClassPath = Widget->GetClass()->GetPathName();
 		Info.bIsVariable = Widget->bIsVariable;
 		Info.bIsRootWidget = (Widget == RootWidgetLC);
 		InfoMapLC.Add(Info.WidgetName, Info);
@@ -3265,17 +3269,183 @@ bool UWidgetService::RenameWidget(
 		}
 	}
 
-	WidgetBP->Modify();
-	WidgetBP->WidgetTree->Modify();
-	TargetWidget->Modify();
-
-	const FName NewFName(*NewName);
-	TargetWidget->Rename(*NewName, TargetWidget->GetOuter(), REN_DontCreateRedirectors);
-
-	FBlueprintEditorUtils::MarkBlueprintAsModified(WidgetBP);
+	// Route through the editor's own rename so WidgetAnimation bindings, delegate bindings,
+	// desired focus, navigation bindings and graph variable nodes follow the new name
+	// (a raw UObject::Rename left animation tracks pointing at the old name, FND-01276).
+	if (!FWidgetBlueprintOperationUtils::RenameWidget(WidgetBP, TargetWidget, NewName))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UWidgetService::RenameWidget: FWidgetBlueprintOperationUtils::RenameWidget rejected '%s' -> '%s' in '%s' (invalid or non-unique name)"), *OldName, *NewName, *WidgetPath);
+		return false;
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("UWidgetService::RenameWidget: Renamed '%s' to '%s' in '%s'"), *OldName, *NewName, *WidgetPath);
 	return true;
+}
+
+FWidgetReplaceClassResult UWidgetService::ReplaceWidgetClass(
+	const FString& WidgetPath,
+	const FString& WidgetName,
+	const FString& NewClassPath,
+	bool bKeepNamedSlotContent)
+{
+	FWidgetReplaceClassResult Result;
+
+	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(WidgetPath);
+	if (!WidgetBP || !WidgetBP->WidgetTree)
+	{
+		Result.ErrorMessage = FString::Printf(TEXT("Widget Blueprint '%s' not found"), *WidgetPath);
+		return Result;
+	}
+
+	UWidget* TargetWidget = FindWidgetByName(WidgetBP, WidgetName);
+	if (!TargetWidget)
+	{
+		Result.ErrorMessage = FString::Printf(TEXT("Widget '%s' not found in '%s'"), *WidgetName, *WidgetPath);
+		return Result;
+	}
+
+	// Full class path only: a bare asset name would hit the same static cache trap as AddComponent.
+	if (!NewClassPath.StartsWith(TEXT("/")) || !NewClassPath.Contains(TEXT(".")))
+	{
+		Result.ErrorMessage = FString::Printf(TEXT("NewClassPath '%s' must be a full class path, e.g. /Game/UI/WBP_X.WBP_X_C or /Script/UMG.Border"), *NewClassPath);
+		return Result;
+	}
+
+	UClass* NewClass = LoadClass<UWidget>(nullptr, *NewClassPath);
+	if (!NewClass)
+	{
+		Result.ErrorMessage = FString::Printf(TEXT("Could not load a UWidget class from '%s' (is the target WBP compiled? the path needs the _C suffix)"), *NewClassPath);
+		return Result;
+	}
+
+	Result.OldClassPath = TargetWidget->GetClass()->GetPathName();
+	Result.NewClassPath = NewClass->GetPathName();
+	Result.SlotClassBefore = TargetWidget->Slot ? TargetWidget->Slot->GetClass()->GetName() : FString();
+
+	auto DescribeNamedSlots = [](UWidget* Widget, TArray<FString>& Out, TArray<FName>* OutFilledSlots)
+	{
+		const INamedSlotInterface* NamedSlotHost = Cast<INamedSlotInterface>(Widget);
+		if (!NamedSlotHost)
+		{
+			return;
+		}
+		TArray<FName> SlotNames;
+		NamedSlotHost->GetSlotNames(SlotNames);
+		for (const FName SlotName : SlotNames)
+		{
+			const UWidget* Content = NamedSlotHost->GetContentForSlot(SlotName);
+			Out.Add(FString::Printf(TEXT("%s=%s"), *SlotName.ToString(), Content ? *Content->GetName() : TEXT("<empty>")));
+			if (Content && OutFilledSlots)
+			{
+				OutFilledSlots->Add(SlotName);
+			}
+		}
+	};
+
+	TArray<FName> FilledSlotsBefore;
+	DescribeNamedSlots(TargetWidget, Result.NamedSlotsBefore, &FilledSlotsBefore);
+
+	// ReplaceWidgetWithTemplate deletes the old host and, with it, every widget parked in its
+	// NamedSlots (measured: a duplicated page lost its WBP_HalftoneMenu tile content). Detach the
+	// content first (SetContentForSlot(null) only drops the binding, it does not delete the
+	// widget), then re-attach it to the replacement host by slot name. The replace recompiles the
+	// blueprint, and the compiler trashes every widget not reachable from the root, so the
+	// detached content is parked under the root panel for the duration of the replace.
+	TArray<TPair<FName, UWidget*>> DetachedContent;
+	UPanelWidget* ParkingPanel = Cast<UPanelWidget>(WidgetBP->WidgetTree->RootWidget);
+	if (bKeepNamedSlotContent && FilledSlotsBefore.Num() > 0)
+	{
+		INamedSlotInterface* HostBefore = Cast<INamedSlotInterface>(TargetWidget);
+		if (HostBefore && !ParkingPanel)
+		{
+			Result.ErrorMessage = TEXT("Cannot keep NamedSlot content: the blueprint root is not a panel to park it under. Pass bKeepNamedSlotContent=false to accept losing it.");
+			return Result;
+		}
+		if (HostBefore)
+		{
+			WidgetBP->WidgetTree->Modify();
+			TargetWidget->Modify();
+			ParkingPanel->Modify();
+			for (const FName SlotName : FilledSlotsBefore)
+			{
+				UWidget* Content = HostBefore->GetContentForSlot(SlotName);
+				DetachedContent.Emplace(SlotName, Content);
+				HostBefore->SetContentForSlot(SlotName, nullptr);
+				Content->Modify();
+				ParkingPanel->AddChild(Content);
+			}
+		}
+	}
+
+	FText ErrorText;
+	if (!FWidgetBlueprintOperationUtils::ReplaceWidgetWithTemplate(WidgetBP, TargetWidget, NewClass, ErrorText))
+	{
+		// Put the content back on the (still-present) old host.
+		if (INamedSlotInterface* HostBefore = Cast<INamedSlotInterface>(TargetWidget))
+		{
+			for (const TPair<FName, UWidget*>& Entry : DetachedContent)
+			{
+				Entry.Value->RemoveFromParent();
+				HostBefore->SetContentForSlot(Entry.Key, Entry.Value);
+			}
+		}
+		Result.ErrorMessage = ErrorText.ToString();
+		UE_LOG(LogTemp, Warning, TEXT("UWidgetService::ReplaceWidgetClass: '%s' in '%s' -> '%s' failed: %s"), *WidgetName, *WidgetPath, *NewClassPath, *Result.ErrorMessage);
+		return Result;
+	}
+
+	// The widget object is new; re-resolve it by (preserved) name.
+	UWidget* NewWidget = FindWidgetByName(WidgetBP, WidgetName);
+	if (!NewWidget)
+	{
+		Result.ErrorMessage = FString::Printf(TEXT("Replace reported success but '%s' is no longer in the tree"), *WidgetName);
+		return Result;
+	}
+
+	Result.NewClassPath = NewWidget->GetClass()->GetPathName();
+	Result.SlotClassAfter = NewWidget->Slot ? NewWidget->Slot->GetClass()->GetName() : FString();
+
+	INamedSlotInterface* HostAfter = Cast<INamedSlotInterface>(NewWidget);
+	if (HostAfter)
+	{
+		TArray<FName> NewSlotNames;
+		HostAfter->GetSlotNames(NewSlotNames);
+		for (const TPair<FName, UWidget*>& Entry : DetachedContent)
+		{
+			Entry.Value->RemoveFromParent();
+			// Only slots that exist on the new class can take the content back.
+			if (NewSlotNames.Contains(Entry.Key))
+			{
+				HostAfter->SetContentForSlot(Entry.Key, Entry.Value);
+			}
+		}
+	}
+	else
+	{
+		for (const TPair<FName, UWidget*>& Entry : DetachedContent)
+		{
+			Entry.Value->RemoveFromParent();
+		}
+	}
+	DescribeNamedSlots(NewWidget, Result.NamedSlotsAfter, nullptr);
+
+	bool bSurvived = true;
+	for (const FName SlotName : FilledSlotsBefore)
+	{
+		const UWidget* After = HostAfter ? HostAfter->GetContentForSlot(SlotName) : nullptr;
+		if (!After)
+		{
+			bSurvived = false;
+		}
+	}
+	Result.bNamedSlotContentSurvived = bSurvived;
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
+
+	Result.bSuccess = true;
+	UE_LOG(LogTemp, Log, TEXT("UWidgetService::ReplaceWidgetClass: '%s' in '%s': %s -> %s (NamedSlots survived: %s)"),
+		*WidgetName, *WidgetPath, *Result.OldClassPath, *Result.NewClassPath, bSurvived ? TEXT("yes") : TEXT("no"));
+	return Result;
 }
 
 // =================================================================
@@ -4016,6 +4186,7 @@ TArray<FWidgetComponentSnapshot> UWidgetService::GetWidgetSnapshot(const FString
 		FWidgetComponentSnapshot Snapshot;
 		Snapshot.WidgetName = Widget->GetName();
 		Snapshot.WidgetClass = Widget->GetClass()->GetName();
+		Snapshot.WidgetClassPath = Widget->GetClass()->GetPathName();
 		Snapshot.ParentWidget = ParentName;
 		Snapshot.bIsRootWidget = (Widget == RootWidget);
 		Snapshot.bIsVariable = Widget->bIsVariable;
@@ -4068,6 +4239,7 @@ FWidgetComponentSnapshot UWidgetService::GetComponentSnapshot(const FString& Wid
 	UWidget* RootWidget = WidgetBP->WidgetTree->RootWidget;
 	Snapshot.WidgetName = Widget->GetName();
 	Snapshot.WidgetClass = Widget->GetClass()->GetName();
+	Snapshot.WidgetClassPath = Widget->GetClass()->GetPathName();
 	Snapshot.bIsRootWidget = (Widget == RootWidget);
 	Snapshot.bIsVariable = Widget->bIsVariable;
 	Snapshot.SlotInfo = BuildSlotInfo(Widget);
