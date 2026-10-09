@@ -1,14 +1,32 @@
 ---
 name: umg-widgets/ui-patterns-reference
-description: Project-neutral reference implementations of the UI-material AngelScript patterns (material-write helper, pure rules + unit test, animated button base with rest-pose settle, slot base, fill base, grid base with CommonButtonGroup) — copy and rename the prefix; needs no Epic UIMaterialLab pack. Read before writing any AS widget base that drives a UI material.
+description: The compiled HF_Common UI-material AngelScript bases (HF_UiMaterial write helper, HF_UiFillRules + test, UHF_MaterialButtonBase with rest-pose settle, UHF_SlotButtonBase, UHF_MaterialFillBase, UHF_SlotGridBase with CommonButtonGroup, UHF_TileBase) and the contract they follow — derive or reparent onto them; needs no Epic UIMaterialLab pack. Read before writing any AS widget base that drives a UI material.
 ---
 
-# UI pattern reference (copy, then rename `UiMat` to your project prefix)
+# UI pattern reference (the compiled HF_Common bases)
 
-Proven on UE 5.8 Hazelight in the SpaceWasteCollector Applications-page port (WI-1548). The source pack
-(Epic UIMaterialLab) is NOT required: every pattern below stands alone. Process: `screen-process.md`; materials and
-animations: `ui-materials.md`; base-class rules: `script-base-first.md`. Verify any signature against the generated
-AS API dump / compiler in your project before relying on it (a dump miss proves nothing).
+The classes live in `HF_Common/Script/UI/Material/` (engine fork `Engine/Plugins/HF_Plugins/HF_Common`; HF_Common.uplugin
+depends on CommonUI). Promoted from the SpaceWasteCollector Applications-page port (WI-1548) in WI-1550 and proven on
+UE 5.8 Hazelight. The source pack (Epic UIMaterialLab) is NOT required. Process: `screen-process.md`; materials and
+animations: `ui-materials.md`; base-class rules: `script-base-first.md`.
+
+**Use the compiled classes: parent a WBP on one of them (`/Script/Angelscript.HF_MaterialButtonBase`, no `U` in the
+`load_class` path) instead of writing a parallel base. The source is the reference: read the `.as` file, and copy it
+only to adapt a variant.** Verify any native signature against the generated AS API dump / compiler (a dump miss proves
+nothing).
+
+| Class (file `HF_<name>.as`) | Derives | Role |
+|---|---|---|
+| `HF_UiMaterial` namespace (`HF_UiMaterial.as`) | none | `SetScalar/SetVector/SetTexture(UImage, FName, value)` uncached MID writes |
+| `HF_UiFillRules` namespace (+ `HF_UiFillRules_Test.as`) | none | pure `ClampFill`, `QuantizeSegments`; world-free tests `Test_HF_UiFillRules*` |
+| `UHF_MaterialButtonBase` (`HF_MaterialButtonBase.as`) | `UCommonButtonBase` | `Background`, optional `Label`, `ButtonText`, optional `Anim_Hover`; rest-pose settle in `Construct` |
+| `UHF_SlotButtonBase` (`HF_SlotButtonBase.as`) | `UHF_MaterialButtonBase` | selectable/toggleable slot, `SlotMaterial`, optional `Anim_Equip`, `SetItemTexture` |
+| `UHF_SlotGridBase` (`HF_SlotGridBase.as`) | `UUserWidget` | `Grid` (`UUniformGridPanel`) + transient `UCommonButtonGroupBase` for exclusive selection, `OnSlotSelected`, `GetSelectedIndex` |
+| `UHF_MaterialFillBase` (`HF_MaterialFillBase.as`) | `UUserWidget` | `FillImage`, `FillParamName` (default `Fill amount`), `FillMaterial`, `InitialFill`, `SetFill/GetFill` |
+| `UHF_TileBase` (`HF_TileBase.as`) | `UUserWidget` | sized container + title + content NamedSlot; binds `SizeBox_Container`, `Text_Name`, `NamedSlot_203`, `Image_Shadow`; no material writes |
+
+All log through `HF_Log` category `n"HF_Ui"`; designer properties use category `"HF UI"`. The bases are final in the
+project: a project WBP is parented directly to them (no per-project shell class).
 
 ## Contract every base follows
 
@@ -16,9 +34,9 @@ AS API dump / compiler in your project before relying on it (a dump miss proves 
    (`Hovered`, `Is Active`); script only plays it. Script writes only script-owned values (fill amount, item
    texture), never a parameter an animation also keys.
 2. **One scalar per state**; look = a UI-domain material instance, not a new master.
-3. **Uncached MID writes**: re-fetch `Image.GetDynamicMaterial()` on every write; the MID goes stale after
-   `SetBrushFromMaterial` or an animation restore.
-4. **Pure rules in a namespace** (no UObjects), unit-tested world-free; everything else is thin glue.
+3. **Uncached MID writes**: re-fetch `Image.GetDynamicMaterial()` on every write (`HF_UiMaterial::SetScalar`); the MID
+   goes stale after `SetBrushFromMaterial` or an animation restore.
+4. **Pure rules in a namespace** (no UObjects), unit-tested world-free (`HF_UiFillRules`); everything else is thin glue.
 5. **UCLASS(Abstract) base, WBP holds tree/art/animations only**: zero EventGraph nodes, zero Blueprint variables.
    Animations bind through `UPROPERTY(BindWidgetAnim, Transient)`; the optional form is
    `UPROPERTY(Transient, meta = (BindWidgetAnimOptional))` (the bare keyword is rejected). The animation FName must
@@ -29,156 +47,23 @@ AS API dump / compiler in your project before relying on it (a dump miss proves 
 7. **Rest pose**: a hover animation's frame 0 is the rest state, not the material instance default. Settle it at
    Construct (below), or an instance whose default is the hovered value rests hovered.
 
-## Material write helper (script-owned values only)
+## Adapting a variant
 
-```angelscript
-namespace UiMatMaterial
-{
-	void SetScalar(UImage Image, FName Param, float Value)
-	{
-		if (!IsValid(Image))
-			return;
-		UMaterialInstanceDynamic MID = Image.GetDynamicMaterial(); // never cache the MID
-		if (IsValid(MID))
-			MID.SetScalarParameterValue(Param, Value);
-	}
-	// SetVector / SetTexture are the same shape with SetVectorParameterValue / SetTextureParameterValue.
-}
-```
-
-## Pure rules + unit test
-
-```angelscript
-namespace UiMatRules
-{
-	float ClampFill(float Fill) { return Math::Clamp(Fill, 0.0, 1.0); }
-
-	// Lit segments of a segmented bar: round DOWN (a segment lights only once fully reached); the bias absorbs
-	// float noise (0.6 * 5 = 2.9999999); NumSteps <= 0 yields 0; never exceeds NumSteps.
-	int QuantizeSegments(float Fill01, int NumSteps)
-	{
-		if (NumSteps <= 0)
-			return 0;
-		const int Lit = Math::FloorToInt(ClampFill(Fill01) * NumSteps + 0.0001);
-		return Math::Clamp(Lit, 0, NumSteps);
-	}
-}
-
-void Test_UiMatQuantize(FUnitTest& T)
-{
-	T.AssertEquals(5, UiMatRules::QuantizeSegments(0.5f, 10), "half lights half");
-	T.AssertEquals(3, UiMatRules::QuantizeSegments(0.6f, 5), "float noise still lands on 3");
-	T.AssertEquals(0, UiMatRules::QuantizeSegments(0.5f, 0), "zero steps yields 0");
-}
-```
-
-Keep tests cheap and world-free: hot reload runs every unit test of the recompiled module.
-
-## Animated button base (hover animation + rest-pose settle)
-
-```angelscript
-UCLASS(Abstract)
-class UUiMatButtonBase : UCommonButtonBase
-{
-	UPROPERTY(BindWidget) UImage Background;            // brush image whose material the animation keys
-	UPROPERTY(BindWidgetOptional) UTextBlock Label;
-	UPROPERTY(EditAnywhere) FText ButtonText;
-	UPROPERTY(Transient, meta = (BindWidgetAnimOptional)) UWidgetAnimation Anim_Hover;
-
-	UFUNCTION(BlueprintOverride) void PreConstruct(bool IsDesignTime) { ApplyButtonText(); }
-
-	// Rest state = Anim_Hover frame 0. Play it in reverse from its end at a high speed so it lands on
-	// frame 0 in the first tick (no visible hover-out tween at spawn).
-	UFUNCTION(BlueprintOverride)
-	void Construct()
-	{
-		if (IsValid(Anim_Hover))
-			PlayAnimation(Anim_Hover, Anim_Hover.GetEndTime(), 1, EUMGSequencePlayMode::Reverse, 100.0);
-	}
-
-	UFUNCTION(BlueprintOverride) void OnHovered()   { if (IsValid(Anim_Hover)) PlayAnimationForward(Anim_Hover); }
-	UFUNCTION(BlueprintOverride) void OnUnhovered() { if (IsValid(Anim_Hover)) PlayAnimationReverse(Anim_Hover); }
-
-	private void ApplyButtonText()
-	{
-		if (IsValid(Label) && !ButtonText.IsEmpty())
-			Label.SetText(ButtonText);
-	}
-}
-```
-
-## Slot base (selected = equipped, second animation)
-
-Derive from the button base; `OnInitialized` → `SetIsSelectable(true); SetIsToggleable(true);`.
-`OnSelected` → `PlayAnimationForward(Anim_Equip)`, `OnDeselected` → `PlayAnimationReverse(Anim_Equip)`
-(`Anim_Equip` is another `BindWidgetAnimOptional`). A per-slot look comes from an `EditAnywhere
-UMaterialInterface SlotMaterial` applied with `Background.SetBrushFromMaterial` in `PreConstruct` (an instance,
-not a new master). Item art is script-owned data: `UiMatMaterial::SetTexture(Background, n"ItemTexture", Tex)`.
-The hook names are `OnHovered/OnUnhovered/OnSelected/OnDeselected` (the `BP_`-prefixed names do not exist).
-
-## Fill widget base (one scalar, parameter chosen per instance)
-
-```angelscript
-UCLASS(Abstract)
-class UUiMatFillBase : UUserWidget
-{
-	UPROPERTY(BindWidget) UImage FillImage;
-	UPROPERTY(EditAnywhere) FName FillParamName = n"Fill amount"; // the master's fill scalar
-	UPROPERTY(EditAnywhere) UMaterialInterface FillMaterial;      // per-instance brush material
-	UPROPERTY(EditAnywhere) float InitialFill = 0.5;
-	private float Fill = 0.0;
-
-	UFUNCTION(BlueprintOverride)
-	void PreConstruct(bool IsDesignTime)
-	{
-		if (IsValid(FillMaterial) && IsValid(FillImage))
-			FillImage.SetBrushFromMaterial(FillMaterial);
-		SetFill(InitialFill);
-	}
-
-	UFUNCTION() void SetFill(float NewFill)
-	{
-		Fill = UiMatRules::ClampFill(NewFill);
-		UiMatMaterial::SetScalar(FillImage, FillParamName, Fill);
-	}
-}
-```
-
-A per-instance brush needs `FillMaterial` as a property: widget tooling cannot address a nested child image per
-instance, so do not wrap the fill in a one-off child WBP to vary its brush.
-
-## Grid base with exclusive selection (`UCommonButtonGroupBase`)
-
-```angelscript
-UCLASS(Abstract)
-class UUiMatGridBase : UUserWidget
-{
-	UPROPERTY(BindWidget) UUniformGridPanel Grid;   // rename the tree widget to this and mark IsVariable
-	UPROPERTY(Transient) UCommonButtonGroupBase Group;
-
-	UFUNCTION(BlueprintOverride)
-	void OnInitialized()
-	{
-		Group = Cast<UCommonButtonGroupBase>(NewObject(this, UCommonButtonGroupBase));
-		if (!IsValid(Group) || !IsValid(Grid))
-			return;
-		Group.SetSelectionRequired(false);
-		for (UWidget Child : Grid.GetAllChildren())
-		{
-			UUiMatSlotBase SlotButton = Cast<UUiMatSlotBase>(Child);
-			if (IsValid(SlotButton))
-				Group.AddWidget(SlotButton);
-		}
-		Group.OnSelectedButtonBaseChanged.AddUFunction(this, n"HandleGroupSelectionChanged");
-	}
-
-	UFUNCTION() private void HandleGroupSelectionChanged(UCommonButtonBase Button, int ButtonIndex)
-	{
-		OnSlotSelected(ButtonIndex);
-	}
-	UFUNCTION(BlueprintEvent) void OnSlotSelected(int Index) {}
-}
-```
+- Another family's fill parameter: set `FillParamName` per WBP instance (`Fill progress`, `ProgressValue`); do not
+  fork `UHF_MaterialFillBase`. A per-instance brush needs `FillMaterial` as a property: widget tooling cannot address a
+  nested child image per instance, so do not wrap the fill in a one-off child WBP to vary its brush.
+- Another animated state: add a `BindWidgetAnimOptional` member on a derived project class and play it from
+  `OnSelected/OnDeselected` the way `UHF_SlotButtonBase` does. The hook names are
+  `OnHovered/OnUnhovered/OnSelected/OnDeselected` (the `BP_`-prefixed names do not exist).
+- Another tile: the tile base keeps the source pack's auto-generated widget names so a duplicated WBP binds without
+  renames. A new family renames the widgets in its own base AND via `WidgetService.rename_widget` in the WBP.
+- Rest-pose settle (the one non-obvious body): play `Anim_Hover` in reverse from its end at speed 100 so it lands on
+  frame 0 in the first tick, with no visible hover-out tween at spawn:
+  `PlayAnimation(Anim_Hover, Anim_Hover.GetEndTime(), 1, EUMGSequencePlayMode::Reverse, 100.0);`
+- Grid selection: `Group.SetSelectionRequired(false)`, add each `UHF_SlotButtonBase` child of `Grid`, bind
+  `Group.OnSelectedButtonBaseChanged` to a `UFUNCTION()` taking `(UCommonButtonBase, int)`. Rename the tree widget to
+  `Grid` and mark it IsVariable.
+- Keep tests cheap and world-free: hot reload runs every unit test of the recompiled module.
 
 ## Verify what compiling cannot
 

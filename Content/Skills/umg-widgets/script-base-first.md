@@ -102,11 +102,13 @@ Conventions that make the WBP step mechanical:
 
 A button, tile or slot that reacts to the pointer derives `UCommonButtonBase` (CommonButton owns
 hover/press/selected; no `UButton` hitbox over an `Image`). Hover/equip tweens are WBP animations that
-key a material scalar; the base only plays them. Full material rules: `ui-materials.md`.
+key a material scalar; the base only plays them. Full material rules: `ui-materials.md`. This pattern is compiled in
+HF_Common as `UHF_MaterialButtonBase` (`HF_Common/Script/UI/Material/`, `ui-patterns-reference.md`): reparent onto it
+rather than copying; the excerpt below is the shape, not a file to paste.
 
 ```angelscript
 UCLASS(Abstract)
-class UMatLab_MaterialButtonBase : UCommonButtonBase
+class UHF_MaterialButtonBase : UCommonButtonBase
 {
 	UPROPERTY(BindWidget)
 	UImage Background;                       // the brush image the animation keys

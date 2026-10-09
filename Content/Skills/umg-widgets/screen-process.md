@@ -109,9 +109,12 @@ Table, one row per styled element (reuse existing masters first; check the proje
 
 - Design ref: Epic UIMaterialLab page `9_MaterialLab_Applications` (pack, read-only: `/Game/UIMaterialLab`).
 - Review + plan: `DesignDocs/UI/ui-material-usage-review.md` (17 masters, instance verdicts, section 6 plan table).
-- AS bases `Script/UI/MaterialLab/`: `MatLab_MaterialButtonBase`, `MatLab_FillWidgetBase`, `MatLab_InventorySlotBase`,
-  `MatLab_InventoryGridBase`, `MatLab_ModularTileBase`, `MatLab_HalftoneMenuBase`, `MatLab_ApplicationsPageBase`
-  (+ `MatLabMaterial.as`, `MatLabRules.as`, `MatLabRules_Test.as`; 4 unit tests pass).
+- Generic AS bases, promoted to HF_Common in WI-1550 (`HF_Common/Script/UI/Material/`, see `ui-patterns-reference.md`):
+  `UHF_MaterialButtonBase`, `UHF_SlotButtonBase`, `UHF_SlotGridBase`, `UHF_MaterialFillBase`, `UHF_TileBase`,
+  `HF_UiMaterial::`, `HF_UiFillRules::` (+ `HF_UiFillRules_Test.as`; 4 unit tests pass). The ported WBPs are
+  reparented onto them (no per-project shell classes).
+- Project-only bases `Script/UI/MaterialLab/`: `MatLab_HalftoneMenuBase`, `MatLab_ApplicationsPageBase` (the page demo
+  harness; WBPs `_HalftoneMenu` and `_Applications` stay on them).
 - WBPs `/Game/UI/MaterialLab/`: `WBP_MatLab_Applications` (page), `WBP_MatLab_Button`, `_Button2`, `_Button3`, `_Fill`,
   `_HalftoneMenu`, `_InventoryGrid`, `_InventorySlot`, `_ModularTile`, `_ObjectiveFill`; style `CBS_MatLab_Transparent`;
   instances `MI_ML_ProgressBar_1..3` (switch `bSetProgressValueManually` on, script drives `ProgressValue`).
@@ -123,5 +126,5 @@ Table, one row per styled element (reuse existing masters first; check the proje
      plain UserWidgets with an invisible UButton; fixed with `CBS_MatLab_Transparent` on CDOs AND per instance.
   2. Button3 rest pose: the pack's `Event Construct -> PlayAnimation(Hovered, StartAtTime=GetEndTime, Reverse)` settles
      frame 0; the port deleted the graph chain and rested at the instance default `Hovered=1.0`; fixed in
-     `MatLab_MaterialButtonBase.Construct` (speed 100). Sci-fi menu tile 26.81 -> 0.00.
+     `UHF_MaterialButtonBase.Construct` (speed 100). Sci-fi menu tile 26.81 -> 0.00.
   3. ObjectiveFill sizing: the Fill root was larger than the pack's 100x100 images; fixed by 100x100 SizeBox wrappers.

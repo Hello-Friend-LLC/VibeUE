@@ -88,7 +88,7 @@ UFUNCTION(BlueprintOverride) void Construct()
   `SetBrushFromMaterial` or when an animation restore re-points the brush):
 
 ```angelscript
-namespace MatLabMaterial
+namespace HF_UiMaterial
 {
 	void SetScalar(UImage Image, FName Param, float Value)
 	{
@@ -99,11 +99,12 @@ namespace MatLabMaterial
 }
 ```
 
-  Reference implementation: `Script/UI/MaterialLab/MatLabMaterial.as` (+ `SetVector`, `SetTexture`).
+  Compiled in HF_Common: `HF_Common/Script/UI/Material/HF_UiMaterial.as` (+ `SetVector`, `SetTexture`); call it,
+  do not re-copy it (`ui-patterns-reference.md`).
 - Per-instance looks: `UPROPERTY(EditAnywhere) UMaterialInterface FillMaterial;` on the base and
-  `FillImage.SetBrushFromMaterial(FillMaterial)` in PreConstruct (`MatLab_FillWidgetBase`, `MatLab_InventorySlotBase`).
+  `FillImage.SetBrushFromMaterial(FillMaterial)` in PreConstruct (`UHF_MaterialFillBase`, `UHF_SlotButtonBase`).
   The WBP instance then picks the `MI_*` in the details panel; no Blueprint variable.
-- Fill clamp (0..1) and segment quantise are the only pure rules worth unit-testing (`MatLabRules` + `_Test.as`).
+- Fill clamp (0..1) and segment quantise are the only pure rules worth unit-testing (`HF_UiFillRules` + `HF_UiFillRules_Test.as`).
 - Segmented bar `M_UI_ProgressBar_Segmented`: the master animates on its own time-driven off state when the static
   switch `bSetProgressValueManually` is off (pack default, FND-01278). Port instances set the switch ON and script
   writes `ProgressValue` 0..1; `Num Steps` is a per-instance constant, not a per-frame value.
@@ -133,7 +134,7 @@ print([str(n) for n in mel.get_scalar_parameter_names(unreal.load_asset(master_p
 print({str(p.parameter_info.name): p.parameter_value for p in mi.get_editor_property("scalar_parameter_values")})
 # lineage of a WBP generated class
 print(unreal.MathLibrary.class_is_child_of(unreal.load_class(None, path + "." + name + "_C"),
-                                           unreal.load_class(None, "/Script/Angelscript.MatLab_X")))
+                                           unreal.load_class(None, "/Script/Angelscript.HF_MaterialButtonBase")))  # class name without the U prefix
 # graph leftovers / BP variables
 print(unreal.BlueprintService.list_graphs(path), unreal.BlueprintEditorLibrary.list_member_variable_names(bp))
 ```
@@ -173,7 +174,7 @@ scenes = [m for m in unreal.ObjectIterator(unreal.MovieScene) if m.get_outer() =
 a.modify(); a.rename("Anim_Hover")
 for m in scenes: m.modify(); m.rename("Anim_Hover")
 # 5. reparent, compile, verify, save
-BEL.reparent_blueprint(bp, unreal.load_class(None, "/Script/Angelscript.MatLab_MaterialButtonBase"))
+BEL.reparent_blueprint(bp, unreal.load_class(None, "/Script/Angelscript.HF_MaterialButtonBase"))
 cr = unreal.BlueprintService.compile_blueprint(DST)               # errors / warnings lists
 EAL.save_asset(DST, False)
 ```
