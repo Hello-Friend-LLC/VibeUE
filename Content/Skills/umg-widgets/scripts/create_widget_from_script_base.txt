@@ -1,0 +1,58 @@
+# Create a Widget Blueprint whose parent is a script/C++ base class, build the BindWidget tree,
+# compile, and verify. Edit the variables at the top, then run via execute_python_code.
+# See script-base-first.md for the base-class template this expects.
+import unreal
+
+BASE_CLASS_PATH = "/Script/Angelscript.MyPanelWidget"   # C++: "/Script/CommonUI.CommonButtonBase"
+FOLDER = "/Game/UI/MyPanel"
+NAME = "WBP_MyPanel"
+# (widget_type, widget_name, parent_name, is_variable) -- names of BindWidget members must match exactly.
+TREE = [
+    ("CanvasPanel", "RootCanvas", "", True),
+    ("Border", "PanelBorder", "RootCanvas", True),
+    ("VerticalBox", "Stack", "PanelBorder", False),
+    ("TextBlock", "TitleText", "Stack", True),
+    ("ProgressBar", "ValueBar", "Stack", True),
+]
+REQUIRED_BINDS = ["TitleText", "ValueBar"]
+
+path = f"{FOLDER}/{NAME}"
+parent = unreal.load_class(None, BASE_CLASS_PATH)
+if parent is None:
+    raise RuntimeError(f"base class not loaded: {BASE_CLASS_PATH} (compile the script first)")
+
+if not unreal.EditorAssetLibrary.does_asset_exist(path):
+    factory = unreal.WidgetBlueprintFactory()
+    factory.set_editor_property("parent_class", parent)
+    unreal.AssetToolsHelpers.get_asset_tools().create_asset(NAME, FOLDER, unreal.WidgetBlueprint, factory)
+    print("CREATED", path)
+else:
+    print("EXISTS", path)
+
+ws = unreal.WidgetService
+existing = {w.widget_name for w in ws.get_hierarchy(path)}
+for wtype, wname, wparent, is_var in TREE:
+    if wname in existing:
+        continue
+    r = ws.add_component(path, wtype, wname, wparent, is_var)
+    print("ADD", wname, r.success, r.error_message)
+
+bp = unreal.EditorAssetLibrary.load_asset(path)
+unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+
+snap = {s.widget_name: s for s in ws.get_widget_snapshot(path)}
+ok = True
+for name in REQUIRED_BINDS:
+    s = snap.get(name)
+    good = s is not None and s.is_variable
+    ok = ok and good
+    print("BIND", name, "OK" if good else "MISSING/NOT VARIABLE", s.widget_class if s else None)
+
+gen = unreal.load_class(None, f"{path}.{NAME}_C")
+child_ok = gen is not None and unreal.MathLibrary.class_is_child_of(gen, parent)
+print("PARENT", BASE_CLASS_PATH, "OK" if child_ok else "WRONG")
+
+if ok and child_ok:
+    print("SAVE", unreal.EditorAssetLibrary.save_asset(path, False))
+else:
+    print("NOT SAVED: fix the tree / parent first")

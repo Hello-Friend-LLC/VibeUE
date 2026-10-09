@@ -6,7 +6,7 @@ description: Step-by-step UMG widget task workflows — create a WBP, build a me
 # UMG Widget Workflows
 
 ## Contents
-- Create Widget Blueprint
+- Create Widget Blueprint (base class first: `script-base-first.md`)
 - Build a Menu
 - Canvas Positioning
 - Inspect a Widget
@@ -23,16 +23,23 @@ objects used below are in `reference.md`.
 
 ## Create Widget Blueprint
 
+Decide the parent first. A widget with data, state or input gets a script/C++ base class **before**
+the WBP exists (`script-base-first.md`); a plain `UserWidget` parent is for decorative widgets only.
+
 ```python
 import unreal
 
 factory = unreal.WidgetBlueprintFactory()
+# Decorative widget:
 factory.set_editor_property("parent_class", unreal.UserWidget)
+# Logic-bearing widget: the compiled script/C++ base (AngelScript: "/Script/Angelscript.<Class>")
+# factory.set_editor_property("parent_class", unreal.load_class(None, "/Script/Angelscript.MyPanelWidget"))
 asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
 asset_tools.create_asset("MainMenu", "/Game/UI", unreal.WidgetBlueprint, factory)
 ```
 
-Runnable: `scripts/create_widget.txt`.
+Runnable: `scripts/create_widget.txt` (plain) / `scripts/create_widget_from_script_base.txt`
+(script base + BindWidget tree + verification).
 
 ## Build a Menu
 

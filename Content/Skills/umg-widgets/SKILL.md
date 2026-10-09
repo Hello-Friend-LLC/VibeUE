@@ -39,6 +39,27 @@ matching workflow doc and/or run the matching sample script.
 
 ## Critical Rules
 
+### 🚨 Base class FIRST, Widget Blueprint second (any widget with data, state or input)
+
+Build the abstract script/C++ base class before the WBP, then create the WBP **with that class as
+its parent** so the Blueprint holds only the tree, art and animations:
+
+1. Write `UCLASS(Abstract) class UMyPanelWidget : UUserWidget` (AngelScript on the Hazelight fork,
+   or a C++ `UCLASS(Abstract, Blueprintable)`) with one `UPROPERTY(BindWidget)` per tree element it
+   needs (`BindWidgetOptional` for optional ones), all behaviour in the class, `BP_*`
+   `BlueprintEvent` hooks for animations. Compile it.
+2. Create the WBP with `parent_class = unreal.load_class(None, "/Script/Angelscript.MyPanelWidget")`
+   (C++: `"/Script/<Module>.<Class>"`).
+3. Add the tree: each bound widget has **exactly** the member's name, `is_variable=True`, and a
+   compatible class. Compile; a "BindWidget … not found" error means the tree is incomplete —
+   never add a Blueprint variable to silence it.
+4. Verify: `get_widget_snapshot` shows every bound name as a variable, and
+   `MathLibrary.class_is_child_of(load_class(None, path + "." + name + "_C"), parent)` is `True`.
+
+Full template, reparent path for legacy WBPs, ListView-entry workaround and review checklist:
+**`script-base-first.md`**. Runnable: `scripts/create_widget_from_script_base.txt`. Skip the base
+class only for a purely decorative widget with no logic.
+
 ### 🚨 Creating Widget Blueprints — only one pattern works
 
 `WidgetService` does **not** create the asset. Create it with the factory, then use `WidgetService`
@@ -47,13 +68,15 @@ to populate it:
 ```python
 import unreal
 factory = unreal.WidgetBlueprintFactory()
-factory.set_editor_property("parent_class", unreal.UserWidget)
+factory.set_editor_property("parent_class", unreal.UserWidget)   # or load_class(None, "/Script/Angelscript.MyPanelWidget")
 asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
 asset_tools.create_asset("MainMenu", "/Game/UI", unreal.WidgetBlueprint, factory)
 ```
 
 Do **not** call `BlueprintEditorLibrary.get_blueprint_class()`, `unreal.create_widget_blueprint()`, or
 `WidgetService.create_widget()` — none exist. (Runnable: `scripts/create_widget.txt`.)
+`get_editor_property("parent_class")` is not readable on a `WidgetBlueprint`; check lineage with
+`class_is_child_of` on the generated `_C` class instead.
 
 ### 🚨 Hierarchy: set the root first, parents before children
 
@@ -240,6 +263,8 @@ Sample scripts under `scripts/` are **runnable examples** — edit the variables
 | Task | Workflow | Sample script (run via `execute_python_code`) |
 |------|----------|-----------------------------------------------|
 | Create a Widget Blueprint | `workflows.md` → Create Widget Blueprint | `scripts/create_widget.txt` |
+| Script/C++ base class first, then the WBP extends it (BindWidget tree, verify lineage) | `script-base-first.md` | `scripts/create_widget_from_script_base.txt` |
+| Reparent a legacy WBP onto a script base / ListView entry rows | `script-base-first.md` → §5, §6 | — |
 | Build a menu (root + panel + buttons) | `workflows.md` → Build a Menu | `scripts/build_menu.txt` |
 | Position widgets on a CanvasPanel | `workflows.md` → Canvas Positioning | — |
 | Inspect a widget (hierarchy + properties) | `workflows.md` → Inspect a Widget | `scripts/inspect_hierarchy.txt` |
@@ -265,6 +290,10 @@ loader that exposes this skill; there is no `vibeue-skills-manager` tool):
   `FPIEWidgetHandle`), the WidgetService action list, common properties, and event names.
 - **`mvvm.md`** — MVVM ViewModel support: rules, creation types, binding modes, field names, and full
   add/bind/list/remove workflows.
+- **`script-base-first.md`** — base-class-first authoring: the abstract AngelScript/C++ `UUserWidget`
+  template with BindWidget members, creating the WBP with that parent, BindWidget tree rules,
+  compile/lineage verification, reparenting legacy WBPs, ListView entry rows, hot-reload traps,
+  and a review checklist for existing script widgets.
 
 ## Verification (do this before claiming success)
 
