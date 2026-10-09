@@ -7,7 +7,8 @@ description: UI-domain material patterns for widgets (Epic UIMaterialLab, proven
 
 Measured on UE 5.8 Hazelight (2026-10-09). Pack = Epic UIMaterialLab (`/Game/UIMaterialLab`): guidance, not
 gospel. It ships duplicate masters and Blueprint-variable/graph logic that an instance and an AS base replace.
-Base-class rules: `script-base-first.md`.
+Base-class rules: `script-base-first.md`. The patterns here apply to any project's UI materials, with or without
+the pack (it was only the source of the example screen); reference AS code: `ui-patterns-reference.md`.
 
 ## 1. When a UI material beats a brush/texture
 

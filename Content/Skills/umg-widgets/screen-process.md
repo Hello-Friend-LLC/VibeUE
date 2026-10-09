@@ -6,7 +6,10 @@ description: The one end-to-end process for implementing a UI screen — design 
 # Implement a UI screen: design ref -> material plan -> AS base -> WBP -> verify
 
 Follow in order. Details live in sibling docs: `script-base-first.md` (base template),
-`ui-materials.md` (materials, animations, Python recipes, copy/remap route). Do not restate them here.
+`ui-materials.md` (materials, animations, Python recipes, copy/remap route), `ui-patterns-reference.md` (copyable
+AS base code). This process applies to ANY screen in ANY project; no Epic pack is needed. The Epic UIMaterialLab
+page below is only the worked example (its design ref and copy/remap route apply when porting an existing WBP
+family; for a new screen skip the copy route). Do not restate the sibling docs here.
 
 ## 1. Inputs -> element list
 
