@@ -165,6 +165,12 @@ print(applied.draw_as, applied.tint_color, applied.corner_radius)
 
 Runnable: `scripts/apply_brush.txt`. Field names: `reference.md` → FWidgetBrushInfo.
 
+A brush may also be a **material instance** (UI-domain material): the Image's `Brush.ResourceObject` is the
+`MI_*` (a duplicated pack widget already carries it; for a new one use `resource_path` with `get_brush`
+readback, or have the AS base call `Image.SetBrushFromMaterial(UMaterialInterface)`). Parameters of
+that material are state (animation- or script-driven), not brush fields; prefer an instance of an existing
+master over a new master. Rules and recipes: `ui-materials.md`.
+
 ## Widget Animation
 
 Create the animation, add a track on a real property, then add keyframes.

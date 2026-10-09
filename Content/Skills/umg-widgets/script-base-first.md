@@ -17,8 +17,10 @@ SpaceWasteCollector, WI-1542 / WI-1533) is:
 2. **WBP second.** The Widget Blueprint is created with that class as `parent_class`. It holds only
    the widget tree (names matching the BindWidget members), slots/anchors, fonts, brushes and
    animations. No EventGraph logic, no Blueprint variables.
-3. Designer-facing knobs are `UPROPERTY(EditDefaultsOnly)` on the base; animations are triggered
-   through `UFUNCTION(BlueprintEvent) BP_*` hooks the WBP may implement.
+3. Designer-facing knobs are `UPROPERTY(EditDefaultsOnly)` on the base; animations are either bound as
+   `BindWidgetAnim` members the base plays itself (preferred when the WBP animation keys a material
+   scalar, section 1b / `ui-materials.md`) or triggered through `UFUNCTION(BlueprintEvent) BP_*` hooks the
+   WBP may implement.
 
 Skip the base class only for a purely decorative widget with no data and no input.
 
@@ -95,6 +97,66 @@ Conventions that make the WBP step mechanical:
 - Logging goes through the project log library (`HF_Log` on HF projects), not `Print`.
 - A `UPROPERTY(BindWidget)` / `UFUNCTION` change is a **Full Reload**: stop PIE first, then save
   the `.as` file; body-only edits soft-reload live (see the project's AngelScript hot-reload rules).
+
+### 1b. CommonButtonBase variant (hover/press/selected + animation members)
+
+A button, tile or slot that reacts to the pointer derives `UCommonButtonBase` (CommonButton owns
+hover/press/selected; no `UButton` hitbox over an `Image`). Hover/equip tweens are WBP animations that
+key a material scalar; the base only plays them. Full material rules: `ui-materials.md`.
+
+```angelscript
+UCLASS(Abstract)
+class UMatLab_MaterialButtonBase : UCommonButtonBase
+{
+	UPROPERTY(BindWidget)
+	UImage Background;                       // the brush image the animation keys
+
+	UPROPERTY(BindWidgetOptional)
+	UTextBlock Label;
+
+	// Animation members: the WBP animation's FName MUST equal the property name.
+	UPROPERTY(Transient, meta = (BindWidgetAnimOptional))   // optional form; NOT a plain BindWidgetAnimOptional specifier
+	UWidgetAnimation Anim_Hover;
+	// required form: UPROPERTY(BindWidgetAnim, Transient) UWidgetAnimation Anim_Equip;
+
+	// Rest pose = animation frame 0, NOT the instance's parameter value. Settle it at construct.
+	UFUNCTION(BlueprintOverride)
+	void Construct()
+	{
+		if (IsValid(Anim_Hover))
+			PlayAnimation(Anim_Hover, Anim_Hover.GetEndTime(), 1, EUMGSequencePlayMode::Reverse, 100.0);
+	}
+
+	// Hook names have no BP_ prefix: OnHovered/OnUnhovered/OnSelected/OnDeselected/OnPressed/OnReleased/OnClicked.
+	UFUNCTION(BlueprintOverride)
+	void OnHovered()
+	{
+		if (IsValid(Anim_Hover))
+			PlayAnimationForward(Anim_Hover);
+	}
+
+	UFUNCTION(BlueprintOverride)
+	void OnUnhovered()
+	{
+		if (IsValid(Anim_Hover))
+			PlayAnimationReverse(Anim_Hover);
+	}
+}
+```
+
+Rules for this variant:
+
+- **One writer per material parameter.** The WBP animation is the only writer of a state scalar it keys;
+  script plays it and never also calls `SetScalarParameterValue` with that name. Script-owned values (fill) go
+  through an uncached `Image.GetDynamicMaterial()` write on every update.
+- **Rest pose.** Instance parameter values are not the rest state; settle `Anim_*` at frame 0 in `Construct`
+  (above). A port that deletes the pack's Construct pose chain without this loses the rest pose.
+- **Style.** A `UCommonButtonBase` child with Style None draws a grey box: set a `CommonButtonStyle` with NoDrawType
+  on the CDO AND on each WBP instance (the CDO Style does not reach instances).
+- **Toggle/select.** `SetIsToggleable(true)` + `OnSelected`/`OnDeselected` play the equip animation forward/reverse;
+  exclusivity comes from a Transient `UCommonButtonGroupBase` (`AddWidget`) owned by the grid base.
+- **Hot reload.** Adding `UPROPERTY`/`BindWidgetAnim` members is a Full Reload (stop PIE); a body-only `Construct`
+  edit soft-reloads.
 
 Reusable abstract bases already shipped in `HF_Common` (`Engine/Plugins/HF_Plugins/HF_Common/Script/UI`):
 `UHF_StatBarBaseWidget` / `UHF_GscStatBarBaseWidget` (GAS-attribute bar, `OverrideBoundAttribute`),
@@ -190,6 +252,20 @@ Then delete the graph nodes and Blueprint variables the base now owns (`Blueprin
 `blueprint-graphs` skill), rename tree widgets to the BindWidget names, compile, and run the
 section-4 checks. Interfaces and animations survive a reparent.
 
+Delete Blueprint variables that shadow an AS `UPROPERTY` BEFORE reparenting (same-name collision ICE).
+
+### Remap route: port a WBP family into a new folder (pack stays untouched)
+
+To port an existing family (page + child component WBPs) without editing the originals, copy each WBP
+under a UNIQUE name (`AddComponent` resolves WBP types by bare asset name and caches it), then per WBP:
+`duplicate_asset` -> `WidgetService.replace_widget_class(wbp, widget, "/Game/.../WBP_X.WBP_X_C")` for every
+child UserWidget instance (the target WBP compiled first; NamedSlot content kept by default but its children
+need their own replace) -> delete EventGraph nodes and shadowing BP variables -> `WidgetService.rename_widget`
+to the BindWidget names (animation bindings follow) -> rename each animation object (and its `MovieScene`
+subobject) to the AS `Anim_*` property name via `anim.modify(); anim.rename(...)` -> `reparent_blueprint` ->
+`compile_blueprint` -> `save_asset(path, False)`. Exact commands, the remap check and the traps (never
+`begin_advanced_copy_packages`/`consolidate_assets`): `ui-materials.md` section 6.
+
 ## 6. ListView entry rows (interface wall)
 
 `UListView` entries must implement `UserObjectListEntry`. AngelScript cannot implement interfaces
@@ -209,3 +285,6 @@ over `UShipConsoleSalvageRow`, SpaceWasteCollector WI-1542).
 | Logic or variables in the WBP graph | Move to the base; keep `BP_*` events for animations only |
 | Script class not `Abstract` | `UCLASS(Abstract)` unless the class is meant to be spawned bare |
 | Blueprint variable shadowing a script `UPROPERTY` | Delete the BP variable; the script property is the only one |
+| `UButton` hitbox over an `Image` for a styled button | `UCommonButtonBase` parent + animation members (section 1b) |
+| Material state scalar written by both an animation and script | Animation is the only writer; script plays `Anim_*` |
+| Material instance held in a Blueprint variable | `UPROPERTY(EditAnywhere) UMaterialInterface` on the base + `SetBrushFromMaterial` |

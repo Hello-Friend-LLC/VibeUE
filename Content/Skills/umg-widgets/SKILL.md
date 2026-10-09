@@ -60,6 +60,21 @@ Full template, reparent path for legacy WBPs, ListView-entry workaround and revi
 **`script-base-first.md`**. Runnable: `scripts/create_widget_from_script_base.txt`. Skip the base
 class only for a purely decorative widget with no logic.
 
+### 🚨 Materials: look = an instance, state = one animation-keyed scalar
+
+For any widget whose look or hover/press/fill state is a UI-domain material: one master per family, a
+`MaterialInstanceConstant` per style variant (never a duplicate master for a style change), and runtime
+parameters for STATE only (`Is Hovered`, `Is Active`, `Fill amount`). The WBP animation (a
+`Brush.Brush Material` scalar track) is the ONLY writer of the state scalar it keys; the AS base plays it
+through `UPROPERTY(Transient, meta = (BindWidgetAnimOptional)) UWidgetAnimation Anim_X;` (the animation's FName
+must equal the property name) and never also calls `SetScalarParameterValue` on that name. Script-owned values
+(fill) write `Image.GetDynamicMaterial().SetScalarParameterValue(...)` uncached on every update; per-instance
+looks are `SetBrushFromMaterial` from an `EditAnywhere UMaterialInterface` on the base, never a Blueprint
+variable. Buttons/slots derive `UCommonButtonBase` (no `UButton` hitbox); the base settles the rest pose
+(`Anim_*` frame 0) in `Construct`. Porting an existing WBP family: copy with UNIQUE names and
+`replace_widget_class` (never `begin_advanced_copy_packages`/`consolidate_assets`, FND-01275). Details,
+Python recipes and the review checklist: **`ui-materials.md`**.
+
 ### 🚨 Creating Widget Blueprints — only one pattern works
 
 `WidgetService` does **not** create the asset. Create it with the factory, then use `WidgetService`
@@ -265,6 +280,10 @@ Sample scripts under `scripts/` are **runnable examples** — edit the variables
 | Create a Widget Blueprint | `workflows.md` → Create Widget Blueprint | `scripts/create_widget.txt` |
 | Script/C++ base class first, then the WBP extends it (BindWidget tree, verify lineage) | `script-base-first.md` | `scripts/create_widget_from_script_base.txt` |
 | Reparent a legacy WBP onto a script base / ListView entry rows | `script-base-first.md` → §5, §6 | — |
+| Drive a widget's look/state with a UI material (instance vs master, state animation, fill) | `ui-materials.md` → §1-§4 | — |
+| Inspect widget animations / material params from Python | `ui-materials.md` → §5 | — |
+| Port an existing WBP family into a new folder (copy + class remap + anim rename) | `ui-materials.md` → §6; `script-base-first.md` → §5 | — |
+| Review a UI screen's materials and bases | `ui-materials.md` → §7 | — |
 | Build a menu (root + panel + buttons) | `workflows.md` → Build a Menu | `scripts/build_menu.txt` |
 | Position widgets on a CanvasPanel | `workflows.md` → Canvas Positioning | — |
 | Inspect a widget (hierarchy + properties) | `workflows.md` → Inspect a Widget | `scripts/inspect_hierarchy.txt` |
@@ -294,6 +313,10 @@ loader that exposes this skill; there is no `vibeue-skills-manager` tool):
   template with BindWidget members, creating the WBP with that parent, BindWidget tree rules,
   compile/lineage verification, reparenting legacy WBPs, ListView entry rows, hot-reload traps,
   and a review checklist for existing script widgets.
+- **`ui-materials.md`** — UI-domain material patterns: when a material beats a brush, master vs instance rule,
+  WBP animations keying one state scalar (`BindWidgetAnim` members, one writer, rest pose), script-driven fill
+  values, Python inspection recipes (animations, material params), the copy/remap route for porting a WBP
+  family, and a review checklist.
 
 ## Verification (do this before claiming success)
 
