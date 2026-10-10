@@ -450,6 +450,64 @@ struct FWidgetPreviewResult
 
 	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
 	FString ErrorMessage;
+
+	/** DPI scale actually passed to the widget renderer (explicit option, or resolved from the project DPI curve). 0 if no render happened. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	float DpiScaleUsed = 0.0f;
+
+	/** capture_preview_state only: ordered trail of the state mechanics applied (hook, setters, hover route, animation scrub). */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	FString StateLog;
+};
+
+/**
+ * Options for capture_preview_state: render a widget off-screen in a requested interaction state.
+ * The C++ side is a generic render primitive; state semantics live in the widget's own hook UFUNCTION.
+ */
+USTRUCT(BlueprintType)
+struct FWidgetPreviewStateOptions
+{
+	GENERATED_BODY()
+
+	/** Interaction state: "normal", "hovered", "pressed", "focused", "disabled" or "selected" (case-insensitive). */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	FString State = TEXT("normal");
+
+	/** Name of a UFUNCTION on the widget taking one FName (the state) that poses the widget. Empty = skip the hook. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	FString HookFunction = TEXT("HF_PreviewState");
+
+	/** Optional explicit UWidgetAnimation object name to scrub (empty = none). */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	FString AnimationName;
+
+	/** Animation time in seconds to scrub to. -1 = the animation end. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	float AnimationTime = -1.0f;
+
+	/** DPI scale passed to DrawWidget. 0 = UUserInterfaceSettings::GetDPIScaleBasedOnSize(FIntPoint(Width, Height)). */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	float DpiScale = 0.0f;
+
+	/** Number of DrawWidget calls made in one game-thread call (settles layout/streaming). Minimum 1. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	int32 Frames = 1;
+
+	/** DeltaTime in seconds passed to each DrawWidget call. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	float DeltaTime = 1.0f / 60.0f;
+
+	/** Output file stem (no extension). Empty = "<WBP>_<state>_<W>x<H>". */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	FString OutputName;
+
+	/** Apply the generic CommonUI setters implied by State (enabled / selected / focus) when the widget supports them. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	bool ApplyGenericSetters = true;
+
+	/** Optional desired-size override for the widget root in slate units. (0,0) = fill the render target. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Preview")
+	FVector2D DesiredSize = FVector2D::ZeroVector;
 };
 
 /**
@@ -505,6 +563,7 @@ struct FPIEWidgetHandle
  * - add_animation_track: Add a property track to a widget animation
  * - add_keyframe: Add a keyframe to a widget animation track
  * - capture_preview: Render a widget preview to a PNG file
+ * - capture_preview_state: Render a widget preview in an interaction state (hovered/pressed/...) to a PNG file
  * - start_pie: Start Play-In-Editor
  * - stop_pie: Stop Play-In-Editor
  * - is_pie_running: Check whether PIE is active
@@ -931,6 +990,19 @@ public:
 		int32 Width = 1920,
 		int32 Height = 1080);
 
+	/**
+	 * Capture an off-screen preview of a Widget Blueprint in a requested interaction state
+	 * (normal/hovered/pressed/focused/disabled/selected) at Width x Height with the project DPI
+	 * curve applied. No PIE or OS input is required.
+	 * Maps to action="capture_preview_state"
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Widgets|Preview")
+	static FWidgetPreviewResult CapturePreviewState(
+		const FString& WidgetPath,
+		int32 Width,
+		int32 Height,
+		const FWidgetPreviewStateOptions& Options);
+
 	// =================================================================
 	// PIE Widget Lifecycle
 	// =================================================================
@@ -1172,6 +1244,14 @@ private:
 
 	/** Collect all properties from a widget (all flags, not editable-only) */
 	static TArray<FWidgetPropertyInfo> CollectWidgetProperties(class UWidget* Widget);
+
+	/** Shared off-screen render path behind CapturePreview and CapturePreviewState. bLegacyOutputName writes "<WBP>.png" (capture_preview behaviour). */
+	static FWidgetPreviewResult CapturePreviewInternal(
+		const FString& WidgetPath,
+		int32 Width,
+		int32 Height,
+		const FWidgetPreviewStateOptions& Options,
+		bool bLegacyOutputName);
 
 	/** Helper to load and validate a Widget Blueprint */
 	static class UWidgetBlueprint* LoadWidgetBlueprint(const FString& WidgetPath);

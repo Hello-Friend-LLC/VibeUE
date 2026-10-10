@@ -71,6 +71,7 @@
 #include "Editor/EditorEngine.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
+#include "Engine/UserInterfaceSettings.h"
 #include "Fonts/SlateFontInfo.h"
 #include "ImageUtils.h"
 #include "Materials/MaterialInterface.h"
@@ -82,6 +83,16 @@
 #include "Sections/MovieSceneColorSection.h"
 #include "Sections/MovieSceneFloatSection.h"
 #include "Slate/WidgetRenderer.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SVirtualWindow.h"
+#include "Input/HittestGrid.h"
+#include "Layout/ArrangedWidget.h"
+#include "Framework/Application/SlateApplication.h"
+#include "InputCoreTypes.h"
+#include "Blueprint/WidgetBlueprintGeneratedClass.h"
+#include "GameFramework/PlayerController.h"
+#include "TextureCompiler.h"
 #include "Styling/SlateBrush.h"
 #include "Tracks/MovieSceneColorTrack.h"
 #include "Tracks/MovieSceneFloatTrack.h"
@@ -2763,10 +2774,554 @@ bool UWidgetService::AddKeyframe(
 	return true;
 }
 
+namespace WidgetPreviewStateInternal
+{
+	// Reflection walk over a UObject/UStruct value collecting every texture a FSlateBrush references
+	// (directly as a UTexture2D resource, or through a material's used textures). Walks nested struct
+	// properties (e.g. FButtonStyle -> FSlateBrush) to a small depth; skips arrays/maps/objects on purpose.
+	static void CollectBrushTextures(const UStruct* Struct, const void* Container, int32 Depth, TSet<UTexture2D*>& OutTextures)
+	{
+		if (!Struct || !Container || Depth > 4)
+		{
+			return;
+		}
+
+		for (TFieldIterator<FStructProperty> It(Struct); It; ++It)
+		{
+			const FStructProperty* StructProp = *It;
+			if (!StructProp || !StructProp->Struct)
+			{
+				continue;
+			}
+
+			for (int32 Index = 0; Index < StructProp->ArrayDim; ++Index)
+			{
+				const void* Value = StructProp->ContainerPtrToValuePtr<void>(Container, Index);
+				if (StructProp->Struct == FSlateBrush::StaticStruct())
+				{
+					const FSlateBrush* Brush = static_cast<const FSlateBrush*>(Value);
+					UObject* Resource = Brush ? Brush->GetResourceObject() : nullptr;
+					if (UTexture2D* Texture = Cast<UTexture2D>(Resource))
+					{
+						OutTextures.Add(Texture);
+					}
+					else if (const UMaterialInterface* Material = Cast<UMaterialInterface>(Resource))
+					{
+						TArray<UTexture*> MaterialTextures;
+						Material->GetUsedTextures(MaterialTextures);
+						for (UTexture* MaterialTexture : MaterialTextures)
+						{
+							if (UTexture2D* MaterialTexture2D = Cast<UTexture2D>(MaterialTexture))
+							{
+								OutTextures.Add(MaterialTexture2D);
+							}
+						}
+					}
+				}
+				else
+				{
+					CollectBrushTextures(StructProp->Struct, Value, Depth + 1, OutTextures);
+				}
+			}
+		}
+	}
+
+	// FND-01349: a brush texture that is not yet streamed in renders blank on the first draw.
+	// Make every brush texture of the instance resident (and finish any editor async build) before DrawWidget.
+	static void ForceLoadBrushTextures(UUserWidget* WidgetInstance)
+	{
+		if (!WidgetInstance)
+		{
+			return;
+		}
+
+		TSet<UTexture2D*> Textures;
+		CollectBrushTextures(WidgetInstance->GetClass(), WidgetInstance, 0, Textures);
+		if (const UWidgetTree* Tree = WidgetInstance->WidgetTree)
+		{
+			Tree->ForEachWidgetAndDescendants([&Textures](UWidget* Widget)
+			{
+				if (Widget)
+				{
+					CollectBrushTextures(Widget->GetClass(), Widget, 0, Textures);
+				}
+			});
+		}
+
+		if (Textures.IsEmpty())
+		{
+			return;
+		}
+
+#if WITH_EDITOR
+		TArray<UTexture*> ToFinish;
+		for (UTexture2D* Texture : Textures)
+		{
+			ToFinish.Add(Texture);
+		}
+		FTextureCompilingManager::Get().FinishCompilation(ToFinish);
+#endif
+
+		for (UTexture2D* Texture : Textures)
+		{
+			Texture->SetForceMipLevelsToBeResident(30.0f);
+			Texture->WaitForStreaming();
+		}
+	}
+
+	// --- t110: state mechanics helpers (WI-1561; DOC-0058) ---
+
+	static void AddStateLog(TArray<FString>& StateLog, const FString& Line)
+	{
+		UE_LOG(LogTemp, Log, TEXT("UWidgetService::CapturePreviewState: %s"), *Line);
+		StateLog.Add(Line);
+	}
+
+	// Calls Target->FunctionName(Arg) when FunctionName is a UFUNCTION whose only non-return parameter is an FName.
+	static bool CallSingleNameFunction(UObject* Target, FName FunctionName, FName Arg, FString& OutWhy)
+	{
+		UFunction* Function = Target ? Target->FindFunction(FunctionName) : nullptr;
+		if (!Function)
+		{
+			OutWhy = TEXT("not found on the widget class");
+			return false;
+		}
+
+		FNameProperty* NameParam = nullptr;
+		int32 NumInputParams = 0;
+		for (TFieldIterator<FProperty> It(Function); It && It->HasAnyPropertyFlags(CPF_Parm); ++It)
+		{
+			if (It->HasAnyPropertyFlags(CPF_ReturnParm))
+			{
+				continue;
+			}
+			++NumInputParams;
+			if (!NameParam)
+			{
+				NameParam = CastField<FNameProperty>(*It);
+			}
+		}
+		if (NumInputParams != 1 || !NameParam)
+		{
+			OutWhy = TEXT("signature is not (FName)");
+			return false;
+		}
+
+		uint8* Parms = static_cast<uint8*>(FMemory_Alloca_Aligned(Function->ParmsSize, Function->GetMinAlignment()));
+		FMemory::Memzero(Parms, Function->ParmsSize);
+		for (TFieldIterator<FProperty> It(Function); It && It->HasAnyPropertyFlags(CPF_Parm); ++It)
+		{
+			It->InitializeValue_InContainer(Parms);
+		}
+		NameParam->SetPropertyValue_InContainer(Parms, Arg);
+		Target->ProcessEvent(Function, Parms);
+		for (TFieldIterator<FProperty> It(Function); It && It->HasAnyPropertyFlags(CPF_Parm); ++It)
+		{
+			It->DestroyValue_InContainer(Parms);
+		}
+		return true;
+	}
+
+	// UCommonButtonBase::SetIsSelected(true, /*bGiveClickFeedback*/ false) through reflection, so VibeUE takes
+	// no CommonUI module dependency. Returns false when Target has no such UFUNCTION.
+	static bool CallSetIsSelected(UObject* Target)
+	{
+		UFunction* Function = Target ? Target->FindFunction(TEXT("SetIsSelected")) : nullptr;
+		if (!Function)
+		{
+			return false;
+		}
+
+		uint8* Parms = static_cast<uint8*>(FMemory_Alloca_Aligned(Function->ParmsSize, Function->GetMinAlignment()));
+		FMemory::Memzero(Parms, Function->ParmsSize);
+		for (TFieldIterator<FProperty> It(Function); It && It->HasAnyPropertyFlags(CPF_Parm); ++It)
+		{
+			It->InitializeValue_InContainer(Parms);
+		}
+		if (FBoolProperty* SelectedParam = CastField<FBoolProperty>(Function->FindPropertyByName(TEXT("InSelected"))))
+		{
+			SelectedParam->SetPropertyValue_InContainer(Parms, true);
+		}
+		if (FBoolProperty* FeedbackParam = CastField<FBoolProperty>(Function->FindPropertyByName(TEXT("bGiveClickFeedback"))))
+		{
+			FeedbackParam->SetPropertyValue_InContainer(Parms, false);
+		}
+		Target->ProcessEvent(Function, Parms);
+		for (TFieldIterator<FProperty> It(Function); It && It->HasAnyPropertyFlags(CPF_Parm); ++It)
+		{
+			It->DestroyValue_InContainer(Parms);
+		}
+		return true;
+	}
+
+	// The instance itself when it is a UCommonButtonBase, else its first UCommonButtonBase descendant (null when CommonUI is absent).
+	static UWidget* FindCommonButton(UUserWidget* Instance)
+	{
+		const UClass* CommonButtonClass = FindObject<UClass>(nullptr, TEXT("/Script/CommonUI.CommonButtonBase"));
+		if (!Instance || !CommonButtonClass)
+		{
+			return nullptr;
+		}
+		if (Instance->IsA(CommonButtonClass))
+		{
+			return Instance;
+		}
+		UWidget* Found = nullptr;
+		if (Instance->WidgetTree)
+		{
+			Instance->WidgetTree->ForEachWidgetAndDescendants([&Found, CommonButtonClass](UWidget* Widget)
+			{
+				if (!Found && Widget && Widget->IsA(CommonButtonClass))
+				{
+					Found = Widget;
+				}
+			});
+		}
+		return Found;
+	}
+
+	static void ForEachClassAnimation(UUserWidget* Instance, TFunctionRef<void(UWidgetAnimation*)> Visitor)
+	{
+		for (UClass* Class = Instance ? Instance->GetClass() : nullptr; Class; Class = Class->GetSuperClass())
+		{
+			if (UWidgetBlueprintGeneratedClass* Generated = Cast<UWidgetBlueprintGeneratedClass>(Class))
+			{
+				for (UWidgetAnimation* Animation : Generated->Animations)
+				{
+					if (Animation)
+					{
+						Visitor(Animation);
+					}
+				}
+			}
+		}
+	}
+
+	// Animations currently PLAYING (a paused, held pose does not count).
+	static TArray<UWidgetAnimation*> GetPlayingAnimations(UUserWidget* Instance)
+	{
+		TArray<UWidgetAnimation*> Playing;
+		ForEachClassAnimation(Instance, [Instance, &Playing](UWidgetAnimation* Animation)
+		{
+			if (Instance->IsAnimationPlaying(Animation))
+			{
+				Playing.AddUnique(Animation);
+			}
+		});
+		return Playing;
+	}
+
+	static FString JoinAnimationNames(const TArray<UWidgetAnimation*>& Animations)
+	{
+		TArray<FString> Names;
+		for (const UWidgetAnimation* Animation : Animations)
+		{
+			Names.Add(Animation->GetName());
+		}
+		return Names.Num() > 0 ? FString::Join(Names, TEXT(",")) : FString(TEXT("none"));
+	}
+
+	// Resolve a UWidgetAnimation by property name (BindWidgetAnim[Optional] / BP variable) or generated-class animation name.
+	static UWidgetAnimation* FindWidgetAnimation(UUserWidget* Instance, const FString& Name)
+	{
+		if (!Instance || Name.IsEmpty())
+		{
+			return nullptr;
+		}
+		if (FObjectPropertyBase* Property = CastField<FObjectPropertyBase>(Instance->GetClass()->FindPropertyByName(FName(*Name))))
+		{
+			if (Property->PropertyClass && Property->PropertyClass->IsChildOf(UWidgetAnimation::StaticClass()))
+			{
+				if (UWidgetAnimation* Animation = Cast<UWidgetAnimation>(Property->GetObjectPropertyValue_InContainer(Instance)))
+				{
+					return Animation;
+				}
+			}
+		}
+		UWidgetAnimation* Found = nullptr;
+		const FString InstName = Name + TEXT("_INST");
+		ForEachClassAnimation(Instance, [&Found, &Name, &InstName](UWidgetAnimation* Animation)
+		{
+			if (Found)
+			{
+				return;
+			}
+			bool bMatch = Animation->GetName() == Name || Animation->GetName() == InstName;
+#if WITH_EDITOR
+			bMatch = bMatch || Animation->GetDisplayLabel() == Name;
+#endif
+			if (bMatch)
+			{
+				Found = Animation;
+			}
+		});
+		return Found;
+	}
+
+	static bool IsButtonSlateType(const TSharedRef<SWidget>& Widget)
+	{
+		const FName Type = Widget->GetType();
+		return Type == FName(TEXT("SButton")) || Type == FName(TEXT("SCommonButton")) || Widget->GetTypeAsString().EndsWith(TEXT("Button"));
+	}
+
+	static TSharedPtr<SWidget> FindFirstButtonSlateWidget(const TSharedRef<SWidget>& Root, int32 Depth = 0)
+	{
+		if (Depth > 64)
+		{
+			return nullptr;
+		}
+		if (IsButtonSlateType(Root))
+		{
+			return Root;
+		}
+		if (FChildren* Children = Root->GetChildren())
+		{
+			for (int32 Index = 0; Index < Children->Num(); ++Index)
+			{
+				if (TSharedPtr<SWidget> Found = FindFirstButtonSlateWidget(Children->GetChildAt(Index), Depth + 1))
+				{
+					return Found;
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	// Synthetic hover (DOC-0058): FSlateApplication ignores virtual windows, so route OnMouseEnter by hand along the
+	// virtual window's hittest-grid bubble path at the widget centre (WidgetInteractionComponent precedent), which
+	// covers the root SObjectWidget and the SButton/SCommonButton under it. Fallback: root + first button by tree walk.
+	static void SimulateHover(UUserWidget* Instance, const TSharedRef<SWindow>& Window, FHittestGrid& HitTestGrid, TArray<FString>& StateLog)
+	{
+		TSharedPtr<SWidget> Root = Instance->GetCachedWidget();
+		if (!Root.IsValid())
+		{
+			AddStateLog(StateLog, TEXT("hover: no cached root SWidget; skipped"));
+			return;
+		}
+
+		const FGeometry RootGeometry = Root->GetPaintSpaceGeometry();
+		const FVector2f Center = RootGeometry.GetAbsolutePositionAtCoordinates(FVector2f(0.5f, 0.5f));
+		const FPointerEvent PointerEvent(
+			FSlateApplicationBase::CursorPointerIndex,
+			Center,
+			Center,
+			TSet<FKey>(),
+			EKeys::Invalid,
+			0.0f,
+			FModifierKeysState());
+
+		TArray<FWidgetAndPointer> BubblePath = HitTestGrid.GetBubblePath(Center, 0.0f, /*bIgnoreEnabledStatus*/ false);
+		int32 Entered = 0;
+		bool bRootEntered = false;
+		FString ButtonType;
+		for (FWidgetAndPointer& Arranged : BubblePath)
+		{
+			if (Arranged.Widget == Window)
+			{
+				continue;
+			}
+			Arranged.Widget->OnMouseEnter(Arranged.Geometry, PointerEvent);
+			++Entered;
+			bRootEntered |= (Arranged.Widget == Root.ToSharedRef());
+			if (ButtonType.IsEmpty() && IsButtonSlateType(Arranged.Widget))
+			{
+				ButtonType = Arranged.Widget->GetTypeAsString();
+			}
+		}
+
+		if (!bRootEntered)
+		{
+			Root->OnMouseEnter(RootGeometry, PointerEvent);
+			++Entered;
+		}
+		if (ButtonType.IsEmpty())
+		{
+			if (TSharedPtr<SWidget> Button = FindFirstButtonSlateWidget(Root.ToSharedRef()))
+			{
+				Button->OnMouseEnter(Button->GetPaintSpaceGeometry(), PointerEvent);
+				++Entered;
+				ButtonType = Button->GetTypeAsString() + TEXT("(tree-walk)");
+			}
+		}
+
+		AddStateLog(StateLog, FString::Printf(
+			TEXT("hover: OnMouseEnter at (%.1f,%.1f): bubble path %d widgets, %d entered, root %s, button %s, root IsHovered=%d"),
+			Center.X, Center.Y, BubblePath.Num(), Entered,
+			bRootEntered ? TEXT("via hittest") : TEXT("direct"),
+			ButtonType.IsEmpty() ? TEXT("none") : *ButtonType,
+			Root->IsHovered() ? 1 : 0));
+	}
+
+	// Steps (2)-(4) of DOC-0058 on an instance that has had one prepass draw.
+	static void ApplyPreviewState(
+		UUserWidget* Instance,
+		const TSharedRef<SWindow>& Window,
+		FHittestGrid& HitTestGrid,
+		const FString& StateLower,
+		const FWidgetPreviewStateOptions& Options,
+		TArray<FString>& StateLog)
+	{
+		// (2) state hook: the widget's own state semantics (AS UHF_MaterialButtonBase::HF_PreviewState).
+		bool bHookRan = false;
+		const FName HookName = Options.HookFunction.IsEmpty() ? NAME_None : FName(*Options.HookFunction);
+		if (!HookName.IsNone())
+		{
+			FString Why;
+			bHookRan = CallSingleNameFunction(Instance, HookName, FName(*StateLower), Why);
+			AddStateLog(StateLog, bHookRan
+				? FString::Printf(TEXT("hook %s(%s) called"), *Options.HookFunction, *StateLower)
+				: FString::Printf(TEXT("hook %s skipped: %s"), *Options.HookFunction, *Why));
+			Instance->FlushAnimations();
+		}
+
+		// (3) generic setters. With a successful hook the disabled/selected setters are skipped: their
+		// OnDisabled/OnSelected callbacks start animations that clobber the hook's held pose (t200 trap).
+		if (Options.ApplyGenericSetters)
+		{
+			const TArray<UWidgetAnimation*> PlayingBefore = GetPlayingAnimations(Instance);
+			bool bSettersRan = false;
+
+			if (StateLower == TEXT("disabled"))
+			{
+				if (bHookRan)
+				{
+					AddStateLog(StateLog, TEXT("disabled: SetIsEnabled(false) skipped (hook pose owns the state)"));
+				}
+				else
+				{
+					Instance->SetIsEnabled(false);
+					bSettersRan = true;
+					AddStateLog(StateLog, TEXT("disabled: SetIsEnabled(false)"));
+				}
+			}
+			else if (StateLower == TEXT("selected"))
+			{
+				if (bHookRan)
+				{
+					AddStateLog(StateLog, TEXT("selected: SetIsSelected skipped (hook pose owns the state)"));
+				}
+				else if (UWidget* CommonButton = FindCommonButton(Instance))
+				{
+					const bool bCalled = CallSetIsSelected(CommonButton);
+					bSettersRan = bCalled;
+					AddStateLog(StateLog, FString::Printf(TEXT("selected: SetIsSelected(true) on %s %s"),
+						*CommonButton->GetName(), bCalled ? TEXT("called") : TEXT("not callable")));
+				}
+				else
+				{
+					AddStateLog(StateLog, TEXT("selected: no UCommonButtonBase on the instance; nothing to select"));
+				}
+			}
+			else if (StateLower == TEXT("focused"))
+			{
+				Instance->SetIsFocusable(true);
+				APlayerController* OwningPlayer = Instance->GetOwningPlayer();
+				if (OwningPlayer && OwningPlayer->IsLocalPlayerController() && OwningPlayer->Player)
+				{
+					Instance->SetFocus();
+					bSettersRan = true;
+					AddStateLog(StateLog, TEXT("focused: SetIsFocusable(true) + SetFocus()"));
+				}
+				else
+				{
+					// UWidget::SetUserFocus only logs a PIE message-log error without a local player; skip it.
+					AddStateLog(StateLog, TEXT("focused: no LocalPlayer in the editor world; SetFocus skipped, focus visual = hook pose"));
+				}
+			}
+			else if (StateLower == TEXT("hovered"))
+			{
+				SimulateHover(Instance, Window, HitTestGrid, StateLog);
+				bSettersRan = true;
+			}
+			else if (StateLower == TEXT("pressed"))
+			{
+				AddStateLog(StateLog, TEXT("pressed = animation pose (no synthetic press route)"));
+			}
+
+			if (bSettersRan)
+			{
+				Instance->FlushAnimations();
+				TArray<UWidgetAnimation*> Started = GetPlayingAnimations(Instance);
+				Started.RemoveAll([&PlayingBefore](UWidgetAnimation* Animation) { return PlayingBefore.Contains(Animation); });
+				AddStateLog(StateLog, FString::Printf(TEXT("setter callbacks started animations: %s"), *JoinAnimationNames(Started)));
+				if (Started.Num() > 0)
+				{
+					if (bHookRan)
+					{
+						// DrawWidget never advances UMG animations, so a callback-started animation would hold its
+						// frame 0 over the hook's pose: re-apply the hook so its pose wins.
+						FString Why;
+						CallSingleNameFunction(Instance, HookName, FName(*StateLower), Why);
+						Instance->FlushAnimations();
+						AddStateLog(StateLog, TEXT("hook re-applied over the started animations"));
+					}
+					else
+					{
+						// No hook: settle every started transition at its end pose (what real time would reach).
+						for (UWidgetAnimation* Animation : Started)
+						{
+							Instance->PlayAnimation(Animation, Animation->GetEndTime(), 1, EUMGSequencePlayMode::Forward, 1.0f);
+							Instance->PauseAnimation(Animation);
+						}
+						Instance->FlushAnimations();
+						AddStateLog(StateLog, TEXT("started animations settled at their end pose"));
+					}
+				}
+			}
+		}
+
+		// (4) explicit animation scrub: PlayAnimation(StartAtTime) -> PauseAnimation -> FlushAnimations (DOC-0058).
+		if (!Options.AnimationName.IsEmpty())
+		{
+			if (UWidgetAnimation* Animation = FindWidgetAnimation(Instance, Options.AnimationName))
+			{
+				const float Time = Options.AnimationTime < 0.0f ? Animation->GetEndTime() : Options.AnimationTime;
+				Instance->PlayAnimation(Animation, Time, 1, EUMGSequencePlayMode::Forward, 1.0f);
+				Instance->PauseAnimation(Animation);
+				Instance->FlushAnimations();
+				AddStateLog(StateLog, FString::Printf(TEXT("animation %s scrubbed to %.3fs and paused"), *Animation->GetName(), Time));
+			}
+			else
+			{
+				AddStateLog(StateLog, FString::Printf(TEXT("animation %s not found; skipped"), *Options.AnimationName));
+			}
+		}
+
+		Instance->FlushAnimations();
+	}
+}
+
 FWidgetPreviewResult UWidgetService::CapturePreview(
 	const FString& WidgetPath,
 	int32 Width,
 	int32 Height)
+{
+	// Legacy capture_preview behaviour: state "normal", no hook/setters, DPI scale 1, a single
+	// DrawWidget with DeltaTime 0.1f, output "<WBP>.png". These option values reproduce it exactly.
+	FWidgetPreviewStateOptions LegacyOptions;
+	LegacyOptions.HookFunction.Reset();
+	LegacyOptions.ApplyGenericSetters = false;
+	LegacyOptions.DpiScale = 1.0f;
+	LegacyOptions.Frames = 1;
+	LegacyOptions.DeltaTime = 0.1f;
+	return CapturePreviewInternal(WidgetPath, Width, Height, LegacyOptions, /*bLegacyOutputName*/ true);
+}
+
+FWidgetPreviewResult UWidgetService::CapturePreviewState(
+	const FString& WidgetPath,
+	int32 Width,
+	int32 Height,
+	const FWidgetPreviewStateOptions& Options)
+{
+	return CapturePreviewInternal(WidgetPath, Width, Height, Options, /*bLegacyOutputName*/ false);
+}
+
+FWidgetPreviewResult UWidgetService::CapturePreviewInternal(
+	const FString& WidgetPath,
+	int32 Width,
+	int32 Height,
+	const FWidgetPreviewStateOptions& Options,
+	bool bLegacyOutputName)
 {
 	FWidgetPreviewResult Result;
 	Result.Width = Width;
@@ -2775,6 +3330,14 @@ FWidgetPreviewResult UWidgetService::CapturePreview(
 	if (Width <= 0 || Height <= 0)
 	{
 		Result.ErrorMessage = TEXT("Width and Height must be greater than zero.");
+		return Result;
+	}
+
+	const FString StateLower = Options.State.IsEmpty() ? FString(TEXT("normal")) : Options.State.ToLower();
+	if (StateLower != TEXT("normal") && StateLower != TEXT("hovered") && StateLower != TEXT("pressed")
+		&& StateLower != TEXT("focused") && StateLower != TEXT("disabled") && StateLower != TEXT("selected"))
+	{
+		Result.ErrorMessage = FString::Printf(TEXT("Unknown preview state '%s' (expected normal, hovered, pressed, focused, disabled or selected)."), *Options.State);
 		return Result;
 	}
 
@@ -2793,6 +3356,33 @@ FWidgetPreviewResult UWidgetService::CapturePreview(
 	}
 
 	TSharedRef<SWidget> SlateWidget = WidgetInstance->TakeWidget();
+
+	// --- t120 BEGIN: Options.DesiredSize (state path only; legacy capture_preview never enters) ---
+	// Mirrors Tools/ui_kit/rig/spawn.py desired_size: a fixed LOGICAL-size (pre-DPI) part centred in
+	// the render target. Zero on an axis leaves that axis unconstrained; both zero = fill the target.
+	if (!bLegacyOutputName && (Options.DesiredSize.X > 0.0 || Options.DesiredSize.Y > 0.0))
+	{
+		TSharedRef<SBox> SizeBox = SNew(SBox)
+			[
+				SlateWidget
+			];
+		if (Options.DesiredSize.X > 0.0)
+		{
+			SizeBox->SetWidthOverride(static_cast<float>(Options.DesiredSize.X));
+		}
+		if (Options.DesiredSize.Y > 0.0)
+		{
+			SizeBox->SetHeightOverride(static_cast<float>(Options.DesiredSize.Y));
+		}
+		SlateWidget = SNew(SBox)
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
+			[
+				SizeBox
+			];
+	}
+	// --- t120 END ---
+
 	// Gamma must be applied exactly once. CreateTargetFor(..., /*bUseGammaCorrection*/ true) makes
 	// an sRGB render target (IsSRGB() == true, so ExportRenderTarget2DAsPNG writes a true sRGB PNG);
 	// pair it with a LINEAR-space renderer (FWidgetRenderer(false)) that emits linear pixels for the
@@ -2811,12 +3401,74 @@ FWidgetPreviewResult UWidgetService::CapturePreview(
 	// otherwise-aligned content is laid out against real widget sizes rather than zero; the old
 	// SetIsPrepassNeeded(false) skipped that pass and drew centred content bottom-aligned. A
 	// non-zero DeltaTime lets first-frame layout settle, matching the engine thumbnail renderer.
-	WidgetRenderer->DrawWidget(RenderTarget, SlateWidget, FVector2D(Width, Height), 0.1f);
+	const float DpiScale = Options.DpiScale > 0.0f
+		? Options.DpiScale
+		: GetDefault<UUserInterfaceSettings>()->GetDPIScaleBasedOnSize(FIntPoint(Width, Height));
+	Result.DpiScaleUsed = DpiScale;
+
+	// --- t110 BEGIN: state mechanics (state path only; legacy capture_preview never enters) ---
+	// A persistent virtual window + hittest grid (what DrawWidget builds and discards per call) so the
+	// prepass leaves real geometry and a hittest grid for the synthetic hover. Order per DOC-0058:
+	// prepass draw -> hook -> generic setters / hover -> animation scrub -> FlushAnimations -> draws.
+	TSharedPtr<SVirtualWindow> StateWindow;
+	TUniquePtr<FHittestGrid> StateHitTestGrid;
+	if (!bLegacyOutputName)
+	{
+		const FVector2D DrawSize(Width, Height);
+		StateWindow = SNew(SVirtualWindow).Size(DrawSize);
+		StateHitTestGrid = MakeUnique<FHittestGrid>();
+		StateWindow->SetContent(SlateWidget);
+		StateWindow->Resize(DrawSize);
+		WidgetRenderer->DrawWindow(RenderTarget, *StateHitTestGrid, StateWindow.ToSharedRef(), DpiScale, DrawSize, Options.DeltaTime);
+
+		TArray<FString> StateLog;
+		WidgetPreviewStateInternal::ApplyPreviewState(WidgetInstance, StateWindow.ToSharedRef(), *StateHitTestGrid, StateLower, Options, StateLog);
+		Result.StateLog = FString::Join(StateLog, TEXT(" | "));
+	}
+	// --- t110 END ---
+
+	// --- t120 BEGIN: brush texture residency (FND-01349; state path only, legacy path unchanged) ---
+	if (!bLegacyOutputName)
+	{
+		WidgetPreviewStateInternal::ForceLoadBrushTextures(WidgetInstance);
+	}
+	// --- t120 END ---
+
+	// DrawWidget(..., Scale, ...) with Scale == 1.f is identical to the 4-argument overload CapturePreview used.
+	const int32 FrameCount = FMath::Max(1, Options.Frames);
+	for (int32 FrameIndex = 0; FrameIndex < FrameCount; ++FrameIndex)
+	{
+		if (StateWindow.IsValid())
+		{
+			WidgetRenderer->DrawWindow(RenderTarget, *StateHitTestGrid, StateWindow.ToSharedRef(), DpiScale, FVector2D(Width, Height), Options.DeltaTime);
+		}
+		else
+		{
+			WidgetRenderer->DrawWidget(RenderTarget, SlateWidget, DpiScale, FVector2D(Width, Height), Options.DeltaTime);
+		}
+	}
+	if (StateWindow.IsValid())
+	{
+		StateWindow->SetContent(SNullWidget::NullWidget);
+	}
 	BeginCleanup(WidgetRenderer);
 
 	const FString OutputDir = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("WidgetPreviews")));
 	IFileManager::Get().MakeDirectory(*OutputDir, true);
-	const FString OutputPath = FPaths::Combine(OutputDir, WidgetBP->GetName() + TEXT(".png"));
+	FString OutputStem;
+	if (bLegacyOutputName)
+	{
+		OutputStem = WidgetBP->GetName();
+	}
+	else if (!Options.OutputName.IsEmpty())
+	{
+		OutputStem = FPaths::MakeValidFileName(Options.OutputName);
+	}
+	else
+	{
+		OutputStem = FString::Printf(TEXT("%s_%s_%dx%d"), *WidgetBP->GetName(), *StateLower, Width, Height);
+	}
+	const FString OutputPath = FPaths::Combine(OutputDir, OutputStem + TEXT(".png"));
 
 	TUniquePtr<FArchive> Archive(IFileManager::Get().CreateFileWriter(*OutputPath));
 	if (!Archive)
