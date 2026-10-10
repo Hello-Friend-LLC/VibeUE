@@ -63,6 +63,9 @@ Table, one row per styled element (reuse existing masters first; check the proje
   `WidgetService.set_property`. No EventGraph logic, no Blueprint variables.
 - Porting an existing WBP family: the Route C copy/remap (unique names, `replace_widget_class`, delete graph nodes,
   `rename_widget`, animation rename, reparent): `ui-materials.md` sec 6.
+- Texture art: a project may provide an idempotent import route; SpaceWasteCollector has
+  `Tools/ui_kit/import_pack_textures.py` (job JSON ids/all/force; writes an import receipt with settings read-back)
+  and a verified Box margin table (`kit_brushes.json`); read the table, do not re-derive margins.
 - Compile each WBP (`BlueprintService.compile_blueprint`), `EditorAssetLibrary.save_asset(path, False)`.
 
 ## 5. Verification ladder (each rung before the next)
@@ -85,6 +88,11 @@ Table, one row per styled element (reuse existing masters first; check the proje
      by gamepad/keyboard), Disabled; log each transition from the base (`HF_Log::Verbose(n"<Cat>", ...)`) and match
      it with `ue_driver.py wait --log "<regex>"` / `log grep --offset`;
    - bindings: `inst.get_editor_property("Anim_Hover")` is non-null on every live button/slot instance.
+   - A project may provide a state-capture rig; SpaceWasteCollector has `Tools/ui_kit/rig/run_states.py <job.json>`
+     (job: widget_path, desired_size, region_px, states, resolutions): it owns PIE and the editor window, writes one
+     gated PNG per state x resolution plus `last_manifest.json` (hovered/pressed/focused/enabled/selected read-back)
+     and a Pillow region diff. Run `ue_driver.py pie stop` before every job (a kept PIE contaminates the capture);
+     give the widget a fixed desired size (a viewport-filling widget reads hovered=true in `normal`).
 5. Parity (when porting): capture the design-time pack page and the port at the same size with the mouse parked off
    the page; compute `mean_abs_diff` per tile region (Pillow; numpy is absent). Target 0.00 for static tiles;
    time-animated materials (halftone background, SDF bars, glows) differ by phase, compare a pulse-free mask

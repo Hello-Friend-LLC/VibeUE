@@ -19,7 +19,7 @@ nothing).
 |---|---|---|
 | `HF_UiMaterial` namespace (`HF_UiMaterial.as`) | none | `SetScalar/SetVector/SetTexture(UImage, FName, value)` uncached MID writes |
 | `HF_UiFillRules` namespace (+ `HF_UiFillRules_Test.as`) | none | pure `ClampFill`, `QuantizeSegments`; world-free tests `Test_HF_UiFillRules*` |
-| `UHF_MaterialButtonBase` (`HF_MaterialButtonBase.as`) | `UCommonButtonBase` | `Background`, optional `Label`, `ButtonText`, optional `Anim_Hover`; rest-pose settle in `Construct` |
+| `UHF_MaterialButtonBase` (`HF_MaterialButtonBase.as`) | `UCommonButtonBase` | `Background`, optional `Label`, `ButtonText`, optional `Anim_Hover/Pressed/Focused/Selected/Disabled`; rest-pose settle in `Construct` |
 | `UHF_SlotButtonBase` (`HF_SlotButtonBase.as`) | `UHF_MaterialButtonBase` | selectable/toggleable slot, `SlotMaterial`, optional `Anim_Equip`, `SetItemTexture` |
 | `UHF_SlotGridBase` (`HF_SlotGridBase.as`) | `UUserWidget` | `Grid` (`UUniformGridPanel`) + transient `UCommonButtonGroupBase` for exclusive selection, `OnSlotSelected`, `GetSelectedIndex` |
 | `UHF_MaterialFillBase` (`HF_MaterialFillBase.as`) | `UUserWidget` | `FillImage`, `FillParamName` (default `Fill amount`), `FillMaterial`, `InitialFill`, `SetFill/GetFill` |
@@ -46,6 +46,33 @@ project: a project WBP is parented directly to them (no per-project shell class)
    NoDrawType on the class default AND on every existing WBP instance (CDO value does not reach instances).
 7. **Rest pose**: a hover animation's frame 0 is the rest state, not the material instance default. Settle it at
    Construct (below), or an instance whose default is the hovered value rests hovered.
+
+## Kit bases (HF_Common/Script/UI/Kit)
+
+All `UCLASS(Abstract)`; Binds are required `BindWidget` unless `opt` (`...Optional`).
+
+| Class | Derives | Binds | Role |
+|---|---|---|---|
+| `UHF_KitBarBase` | `UUserWidget` | `Bar` (UProgressBar); opt `ValueText`, `Icon`, `Anim_Low`, `Anim_Critical` | `SetValue(Cur, Max)`, `SetIconTexture` |
+| `UHF_LampBase` | `UUserWidget` | `Lens`; opt `Glyph`, `StatusText` | `SetState(EHF_LampState, FText)` |
+| `UHF_GaugeBase` | `UUserWidget` | `Needle`; opt `ValueText` | `SetNormalized`, `SetValue(Cur, Max)` |
+| `UHF_PipRowBase` | `UUserWidget` | `Pips` (UHorizontalBox) | `SetLevel(Level, Max)` |
+| `UHF_CounterBase` | `UUserWidget` | `Digits`; opt `Anim_Tick` | `SetValue(int)` |
+| `UHF_TooltipBase` | `UUserWidget` | `Body`; opt `Title`, `Arrow` | `SetText`, `SetArrowSide` (rotates only) |
+| `UHF_TimingTrackBase` | `UUserWidget` | `Track`, `Needle`, `WindowBand`, `PerfectBand`; opt `WarningBand`, `Anim_Success/Perfect/Fail/Cancelled` | `SetWindow`, `SetNeedle`, `ShowResult` |
+| `UHF_ActionDetailsWidget_KeycapKey` | `UHF_ActionDetailsWidget_DisplayInputKey` | opt `Keycap` | key label on keycap art |
+
+Pure rules: `HF_UiKitRules`, `HF_UiTimingRules` (+ `_Test.as`). `UHF_MaterialButtonBase` anim slots are optional, played by
+the matching event; the WBP binds them by animation NAME.
+
+## Texture-brush variant of the contract
+
+- State overlays are plain Image layers (HitTestInvisible, slot Fill), each keyed by ONE animation (opacity); never
+  `BindWidget` members; a tint above 1 is clamped, so a lighter state is a light overlay.
+- Box brush margins come from the project's brush table (see the project's `kit_brushes.json`), never the pack's
+  candidates. Slate draws Box corners at margin x TEXEL size after `max_texture_size`, not the brush ImageSize:
+  `button_base` 512, `header_strip` 1024, `frame_panel` 512, `frame_slot` 256 are intentional caps; never re-import
+  them with another max.
 
 ## Adapting a variant
 
