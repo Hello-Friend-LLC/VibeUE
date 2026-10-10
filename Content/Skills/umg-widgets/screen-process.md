@@ -75,8 +75,39 @@ Table, one row per styled element (reuse existing masters first; check the proje
 2. Lineage and tree: `MathLibrary.class_is_child_of(load_class(None, path + "." + name + "_C"), base)` is True;
    `get_hierarchy` (NOT `get_widget_snapshot`, which omits NamedSlot content) shows every BindWidget name as a
    variable; every child `widget_class_path` is under the new folder (no pack references).
-3. `WidgetService.capture_preview` (design time, static: hover/press states are NOT exercised here).
-4. PIE capture, `capture_image source=game` (Slate composited) at 1920x1080, 3440x1440, 1280x720. NEVER
+3. PIE-free state ladder (DEFAULT acceptance surface for kit/screen captures; mechanism DOC-0058): the widget rendered
+   off-screen per interaction state through `unreal.WidgetService.capture_preview_state(path, W, H, options)` (see
+   `workflows.md` Capture Preview; legacy `capture_preview` stays static, no states). No PIE, no OS input, no window resize.
+   - Project rig form (SpaceWasteCollector): `python Tools/ui_kit/rig/run_states_offline.py <job.json>`, the same job schema
+     and manifest/naming (`<stem>_<state>_<W>x<H>.png`) as `run_states.py`; states normal/hovered/pressed/focused/disabled
+     (+ selected) at 1920x1080, 3440x1440, 1280x720 with the project DPI curve applied per resolution (0.666 / 1.0 / 1.333).
+     Measured: 4 widgets x 18 cells in 49.6 s total (about 12 s per widget job). Gate = `img_check.py` on the centred
+     region crop (a dim disabled part in a mostly empty frame fails the full-frame low-variance gate).
+   - Verdict per state: region mean abs RGB diff vs normal, CHANGED iff >= 0.5 (`diff.py --threshold`, default 0.5; PIE
+     diffuse noise is 0.22-0.25, FND-01362), else NO-CHANGE.
+   - Parity vs PIE (WBP_Kit_Button/ListRow/Slot + ShipConsoleButton): hovered/focused/selected agree; state cells in 48:
+     33 agree, 15 disagree (disabled x12, ShipConsole pressed x3), zero CHANGED/NO-CHANGE class disagreements. Compare
+     numbers only through the RELATIVE rule: a state cell passes when its offline-vs-PIE diff is within 2.4 of the same
+     widget+resolution normal-vs-normal cross-rig diff (that floor is mostly the offline transparent backdrop vs PIE's
+     dark-grey one: ~2.8 for the opaque ListRow, ~13-15 for transparent-edged widgets). Never an absolute figure and never
+     pixel equality (PIE captures are contrast-boosted, FND-01325).
+   - Limits, state them in the evidence: (a) disabled = the dim pose only, NOT Slate's DisabledEffect desaturation
+     (FND-01360, FND-01363) - judge disabled saturation in PIE or the tester tab; (b) pressed = the Anim_Pressed end pose;
+     PIE pressed is a compound hovered+pressed+focused (FND-01361), and ListRow/Tab/Slot have no Anim_Pressed (pressed ==
+     hovered); (c) WBP_Kit_Button has no Anim_Selected, so selected == normal; (d) the editor world has no LocalPlayer, so
+     focused/selected are the hook pose and CommonUI focus routing is not exercised; (e) hover = the AS hook pose
+     (`HF_PreviewState`), `OnMouseEnter` alone shows nothing on kit buttons (FND-01357); (f) the first capture of a cold
+     texture can be blank (FND-01359): warm with a throwaway capture.
+   - Material `Time`: `Frames`/DeltaTime do NOT advance it (N draws in one editor call see one `FApp::GetCurrentTime()`).
+     Sample Time-driven materials across separate editor calls: `python Tools/ui_kit/rig/time_samples.py <widget_path> <W>
+     <H> <n> <interval_s> [--hook HF_PreviewState] [--warmup 1]` (host-side sleep, `animates` = any consecutive pair
+     CHANGED); on Git Bash set `MSYS_NO_PATHCONV=1` or the `/Game/...` path is rewritten.
+   - Live iteration loop (human or worker, complements the ladder, not a replacement): the Editor Utility Widget
+     `/HF_Common/UI/Editor/EUW_HfWidgetTester` hosts any WBP class in a real top-level window (real hover, animations and
+     material `Time` tick, AS body hot reload re-picks). It has no W x H / DPI control; use it for the disabled
+     desaturation and visual cross-checks, see `workflows.md` for its Python entry points.
+4. PIE capture, ONLY for gameplay-fed widgets, CommonUI action routing, disabled saturation, or an OS press. `capture_image
+   source=game` (Slate composited) at 1920x1080, 3440x1440, 1280x720. NEVER
    `pie_screenshot`/`pie capture` for UMG. Gate each PNG with `img_check.py --after <epoch>`. Rig forms that worked:
    - spawn: `WidgetService.spawn_widget_in_pie(path)` after `ue_driver.py pie start`;
    - hover: `PlayerController.set_mouse_location(x, y)` (viewport px) after `show_mouse_cursor = True` +

@@ -186,7 +186,9 @@ with edge padding in the art, not by disabling filtering globally.
 - Hover, gamepad focus, pressed, selected, disabled, loading, reduced motion.
 - Pause (UI Time keeps running, §5), long session, resize, cooked standalone.
 - Retainer refresh rules tested separately if used.
-- Evidence captured with VibeUE `capture_image source=game` (Slate composited), never a scene-only capture.
+- Evidence captured first with the PIE-free ladder `WidgetService.capture_preview_state` (states x 3 resolutions, DPI
+  curve applied; `screen-process.md` section 5), then with VibeUE `capture_image source=game` (Slate composited) for
+  gameplay-fed widgets, disabled desaturation and OS press; never a scene-only capture.
 
 ## 12. Symptom table
 

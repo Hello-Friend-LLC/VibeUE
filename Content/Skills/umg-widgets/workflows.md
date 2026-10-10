@@ -254,6 +254,59 @@ print(result.success, result.output_path, result.error_message)
 
 Runnable: `scripts/capture_preview.txt`.
 
+### Capture Preview State (PIE-free, interaction states)
+
+`capture_preview_state(widget_path, width, height, options)` renders the widget off-screen in a requested state with the
+project DPI curve applied (`UUserInterfaceSettings::GetDPIScaleBasedOnSize`), no PIE, no OS input. Same result struct as
+`capture_preview` (`success`, `output_path`, `error_message`, plus `dpi_scale_used` and `state_log`, the ordered trail of
+mechanics applied). Mechanism: DOC-0058. Legacy `capture_preview` is unchanged (static, no state, `Saved/WidgetPreviews/<WBP>.png`).
+
+```python
+import unreal
+o = unreal.WidgetPreviewStateOptions()
+o.set_editor_property("state", "hovered")            # normal|hovered|pressed|focused|disabled|selected
+o.set_editor_property("desired_size", unreal.Vector2D(240, 72))   # (0,0) = fill the target; set it for a button
+r = unreal.WidgetService.capture_preview_state("/Game/UI/Toadalled/Kit/WBP_Kit_Button", 1920, 1080, o)
+print(r.success, r.output_path, r.dpi_scale_used, r.state_log, r.error_message)
+```
+
+Options (`WidgetPreviewStateOptions`, defaults): `state` "normal"; `hook_function` "HF_PreviewState" (a UFUNCTION on the
+widget taking one FName; empty = skip); `animation_name` "" (explicit UWidgetAnimation to scrub) with `animation_time`
+-1 (= the animation end); `dpi_scale` 0 (= resolve from W x H); `frames` 1 (DrawWidget calls per capture); `delta_time`
+1/60; `output_name` "" (= `<WBP>_<state>_<W>x<H>`); `apply_generic_setters` True (CommonUI enabled/selected/focus
+setters, skipped when the hook ran); `desired_size` (0,0). State semantics live in the widget's AS hook
+(`UHF_MaterialButtonBase.HF_PreviewState` maps a state to its `Anim_*` end pose); C++ stays a generic primitive.
+Project rig: `Tools/ui_kit/rig/run_states_offline.py <job.json>` (see `screen-process.md` section 5 for measured limits).
+
+Gotchas:
+- `frames` does not advance material `Time` (or UMG animations): N draws in one editor call see one
+  `FApp::GetCurrentTime()`. Sample Time across separate editor calls (`Tools/ui_kit/rig/time_samples.py`), never sleep
+  inside the editor snippet (FND-00627).
+- Pressed is an animation pose (`Anim_Pressed` end pose), not a synthetic press; hover on kit buttons is also the
+  `Anim_Hover` pose (`OnMouseEnter` alone renders no change, FND-01357). Disabled renders the dim pose without Slate's
+  DisabledEffect desaturation (FND-01363): judge that in PIE or the tester tab.
+- Focus / selected visuals need the AS hook: the editor world has no LocalPlayer, so CommonUI focus routing is not
+  exercised. The first capture of a cold texture can be blank (FND-01359): warm with a throwaway capture.
+
+Live tester (complement, real top-level window: real hover, animations and material `Time` tick, AS body hot reload
+re-picks): Editor Utility Widget `/HF_Common/UI/Editor/EUW_HfWidgetTester`.
+
+```python
+import unreal
+sub = unreal.get_editor_subsystem(unreal.EditorUtilitySubsystem)
+euw = unreal.load_asset("/HF_Common/UI/Editor/EUW_HfWidgetTester")
+inst = sub.spawn_and_register_tab(euw)
+# AS UFUNCTIONs have NO exported Python name: reach them with call_method
+# (SetWidgetToTest(class), GetTestWidget(), SetDesiredSize(FVector2D), PreviewState(FName)).
+# Find an existing instance via unreal.ObjectIterator(unreal.EditorUtilityWidget), skipping Default__ CDOs.
+# Close: sub.close_tab_by_id(sub.get_tab_id_from_blueprint(euw))
+```
+
+Capture the tab with `ue_driver.py call epic_capture_image {"source":"window","max_width":0}` and crop host-side.
+`SetDesiredSize` does not pin the size (the ScaleBox stretches, FND-01364), so the tab is a visual-state cross-check, not
+a sizing reference. Measured against headless: hovered/focused/selected agree; disabled differs and the tab is the
+reference (full desaturation).
+
 ## PIE Runtime Check
 
 `start_pie()` is **asynchronous** — PIE is not ready in the same call. Start PIE in one step, then
