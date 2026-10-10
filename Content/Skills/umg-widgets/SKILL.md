@@ -73,7 +73,12 @@ looks are `SetBrushFromMaterial` from an `EditAnywhere UMaterialInterface` on th
 variable. Buttons/slots derive `UCommonButtonBase` (no `UButton` hitbox); the base settles the rest pose
 (`Anim_*` frame 0) in `Construct`. Porting an existing WBP family: copy with UNIQUE names and
 `replace_widget_class` (never `begin_advanced_copy_packages`/`consolidate_assets`, FND-01275). Details,
-Python recipes and the review checklist: **`ui-materials.md`**.
+Python recipes and the review checklist: **`ui-materials.md`**. Engine truth behind the rules (Slate does not
+premultiply Translucent output; tint/RenderOpacity arrive as VertexColor; widget pixel size is TexCoord 3 via the
+engine function `GetUserInterfaceUV`; UI `Time` never pauses; distinct MIDs never batch; RetainerBox repaints every
+frame by default; MPCs resolve per viewport world) with the mechanism-choice table, validation checklist and
+symptom table: **`ui-material-engine-facts.md`**. Epic UIMaterialLab function/master catalogue:
+**`ui-material-lab-catalogue.md`**.
 
 ### 🚨 Creating Widget Blueprints — only one pattern works
 

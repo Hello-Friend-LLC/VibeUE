@@ -9,12 +9,22 @@ Measured on UE 5.8 Hazelight (2026-10-09). Pack = Epic UIMaterialLab (`/Game/UIM
 gospel. It ships duplicate masters and Blueprint-variable/graph logic that an instance and an AS base replace.
 Base-class rules: `script-base-first.md`. The patterns here apply to any project's UI materials, with or without
 the pack (it was only the source of the example screen); reference AS code: `ui-patterns-reference.md`.
+What the engine does underneath (alpha convention, tint, UV channels and widget size, Time clock, MID/invalidation,
+retainer refresh, batching, MPCs, textures, fonts, checklist, symptom table): `ui-material-engine-facts.md`.
+The pack's 40 reusable functions, aspect mechanism and which masters to build on: `ui-material-lab-catalogue.md`.
 
 ## 1. When a UI material beats a brush/texture
 
 - Use a UI-domain material (`MD_UI`, `BLEND_Translucent`) when the look is procedural (rounded SDF box, outline,
   gradient, liquid fill, segmented bar, halftone), must stay crisp at any size/DPI, or must tween between states.
+  Full mechanism table (RoundedBox brush, Box nine-slice, ProgressBar, widget animation, RetainerBox,
+  BackgroundBlur vs material): `ui-material-engine-facts.md` §1.
 - Use a plain texture brush for a flat art asset with no state (icon, photo).
+- Author Translucent masters as Final Color = straight colour, Opacity = coverage (Slate does not premultiply;
+  the whole pack follows this). Aspect-correct shapes read the widget size through `GetUserInterfaceUV` ->
+  `Pixel Size` (`MF_UI_AspectRatio`), never a script-written size (`ui-material-lab-catalogue.md` §2).
+- UI `Time` never pauses or dilates (app clock, `Ignore Pause` is a no-op): anything that must freeze on pause is
+  a script-written scalar.
 - State lives in ONE scalar per state (`Hovered`, `Is Active`, `Fill amount`) that the master lerps between its
   style endpoints (`Button Color - default` / `- hovered`). A brush swap per state is the thing to avoid.
 
