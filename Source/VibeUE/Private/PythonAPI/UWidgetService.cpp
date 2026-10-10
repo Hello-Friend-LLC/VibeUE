@@ -3185,7 +3185,18 @@ namespace WidgetPreviewStateInternal
 			{
 				if (bHookRan)
 				{
-					AddStateLog(StateLog, TEXT("disabled: SetIsEnabled(false) skipped (hook pose owns the state)"));
+					// Generic guarantee that the widget really is disabled whatever the hook did (the kit AS hook already
+					// calls SetIsEnabled(false) itself, so for kit widgets this is a measured no-op: byte-identical PNG, WI-1561
+					// t225). Re-apply the hook afterwards: the OnDisabled callback's animation would otherwise clobber the
+					// held Anim_Disabled pose (DrawWidget never advances animations).
+					Instance->SetIsEnabled(false);
+					Instance->FlushAnimations();
+					FString Why;
+					const bool bReapplied = CallSingleNameFunction(Instance, HookName, FName(*StateLower), Why);
+					Instance->FlushAnimations();
+					AddStateLog(StateLog, FString::Printf(
+						TEXT("disabled: SetIsEnabled(false) then hook re-applied (%s); IsEnabled=%d"),
+						bReapplied ? TEXT("ok") : *Why, Instance->GetIsEnabled() ? 1 : 0));
 				}
 				else
 				{
