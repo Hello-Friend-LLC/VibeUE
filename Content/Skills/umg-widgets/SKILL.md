@@ -30,6 +30,11 @@ related_skills:
 
 # UMG Widget Blueprints Skill
 
+> **No PIE while developing UI (HF rule, Scott 2026-10-10).** Verify with `capture_preview_state` (PIE-free) and the
+> `EUW_HfWidgetTester`; do not start PIE, run PIE checks or captures, or add PIE todos/baselines to a work item. All PIE
+> testing is saved for the very end of the item and done by Scott unless he says otherwise (PIE cycles are expensive);
+> list PIE-only gaps as unverified instead. Any PIE steps in this pack are reference for that end-of-item pass only.
+
 This skill covers authoring **Widget Blueprints (WBP)** with `WidgetService`. Read the Critical Rules
 below first — they prevent the most common failures. Then pick a task from the Task Index and load the
 matching workflow doc and/or run the matching sample script.
