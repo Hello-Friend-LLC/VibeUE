@@ -578,19 +578,11 @@ namespace
 		}
 	}
 
-	UUserWidget* CreateWidgetInstanceForBlueprint(UWidgetBlueprint* WidgetBP)
+	// Shared by the Widget Blueprint path and the WI-1564 t200 class-path capture: picks the PIE world
+	// (else the editor world) and creates "<NameStem>_Instance" of a UUserWidget class.
+	UUserWidget* CreateWidgetInstanceForClass(UClass* WidgetClass, const FString& NameStem)
 	{
-		if (!WidgetBP)
-		{
-			return nullptr;
-		}
-
-		if (!WidgetBP->GeneratedClass || WidgetBP->Status == BS_Dirty)
-		{
-			FKismetEditorUtilities::CompileBlueprint(WidgetBP);
-		}
-
-		if (!WidgetBP->GeneratedClass || !WidgetBP->GeneratedClass->IsChildOf(UUserWidget::StaticClass()))
+		if (!WidgetClass || !WidgetClass->IsChildOf(UUserWidget::StaticClass()))
 		{
 			return nullptr;
 		}
@@ -613,14 +605,28 @@ namespace
 			return nullptr;
 		}
 
-		UClass* WidgetClass = WidgetBP->GeneratedClass;
-		if (!WidgetClass || !WidgetClass->IsChildOf(UUserWidget::StaticClass()))
+		const FName WidgetName = MakeUniqueObjectName(World, WidgetClass, FName(*FString::Printf(TEXT("%s_Instance"), *NameStem)));
+		return CreateWidget<UUserWidget>(World, WidgetClass, WidgetName);
+	}
+
+	UUserWidget* CreateWidgetInstanceForBlueprint(UWidgetBlueprint* WidgetBP)
+	{
+		if (!WidgetBP)
 		{
 			return nullptr;
 		}
 
-		const FName WidgetName = MakeUniqueObjectName(World, WidgetClass, FName(*FString::Printf(TEXT("%s_Instance"), *WidgetBP->GetName())));
-		return CreateWidget<UUserWidget>(World, WidgetClass, WidgetName);
+		if (!WidgetBP->GeneratedClass || WidgetBP->Status == BS_Dirty)
+		{
+			FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+		}
+
+		if (!WidgetBP->GeneratedClass || !WidgetBP->GeneratedClass->IsChildOf(UUserWidget::StaticClass()))
+		{
+			return nullptr;
+		}
+
+		return CreateWidgetInstanceForClass(WidgetBP->GeneratedClass, WidgetBP->GetName());
 	}
 
 	UWidget* FindRuntimeWidgetByName(UUserWidget* WidgetInstance, const FString& ComponentName)
@@ -3352,18 +3358,53 @@ FWidgetPreviewResult UWidgetService::CapturePreviewInternal(
 		return Result;
 	}
 
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(WidgetPath);
-	if (!WidgetBP)
+	UUserWidget* WidgetInstance = nullptr;
+	FString WidgetStem;
+	// A /Script/ path can only name a native/AngelScript class; skip the asset load (it logs an Error
+	// "Can't convert the path ... because it start with /Script/") and go straight to the class branch.
+	UWidgetBlueprint* WidgetBP = WidgetPath.StartsWith(TEXT("/Script/")) ? nullptr : LoadWidgetBlueprint(WidgetPath);
+	if (WidgetBP)
 	{
-		Result.ErrorMessage = TEXT("Widget Blueprint not found.");
-		return Result;
+		WidgetStem = WidgetBP->GetName();
+		WidgetInstance = CreateWidgetInstanceForBlueprint(WidgetBP);
+		if (!WidgetInstance)
+		{
+			Result.ErrorMessage = TEXT("Failed to create widget preview instance.");
+			return Result;
+		}
 	}
-
-	UUserWidget* WidgetInstance = CreateWidgetInstanceForBlueprint(WidgetBP);
-	if (!WidgetInstance)
+	else
 	{
-		Result.ErrorMessage = TEXT("Failed to create widget preview instance.");
-		return Result;
+		// --- WI-1564 t200 BEGIN: UUserWidget class-path fallback (e.g. /Script/Angelscript.CruiseUiSmoke) ---
+		UClass* WidgetClass = LoadClass<UUserWidget>(nullptr, *WidgetPath);
+		if (!WidgetClass)
+		{
+			Result.ErrorMessage = FString::Printf(
+				TEXT("Widget Blueprint not found, and '%s' is not a loadable UUserWidget class path (expected /Game/... asset or /Script/<Module>.<ClassName>)."),
+				*WidgetPath);
+			return Result;
+		}
+
+		WidgetStem = WidgetClass->GetName();
+		WidgetInstance = CreateWidgetInstanceForClass(WidgetClass, WidgetStem);
+		if (!WidgetInstance)
+		{
+			Result.ErrorMessage = FString::Printf(TEXT("Failed to create widget preview instance for class '%s'."), *WidgetPath);
+			return Result;
+		}
+		// --- WI-1564 t200 END ---
+
+		// --- WI-1564 t205 BEGIN: pre-build the widget tree before TakeWidget ---
+		// A code-built UUserWidget (AngelScript) creates its tree in BuildUi(); UUserWidget::RebuildWidget
+		// reads the root inside TakeWidget, so a tree built later (Construct) is never seen (FND-01003), and
+		// OnInitialized is skipped for a context-less CreateWidget(World, ...). BuildUi() MUST be idempotent
+		// (Cruise contract: bUiBuilt guard) because the widget's own OnInitialized may also call it.
+		if (UFunction* BuildFn = WidgetInstance->FindFunction(TEXT("BuildUi")); BuildFn && BuildFn->NumParms == 0)
+		{
+			UE_LOG(LogTemp, Verbose, TEXT("CapturePreviewInternal: pre-built '%s' via BuildUi() before TakeWidget"), *WidgetPath);
+			WidgetInstance->ProcessEvent(BuildFn, nullptr);
+		}
+		// --- WI-1564 t205 END ---
 	}
 
 	TSharedRef<SWidget> SlateWidget = WidgetInstance->TakeWidget();
@@ -3469,7 +3510,7 @@ FWidgetPreviewResult UWidgetService::CapturePreviewInternal(
 	FString OutputStem;
 	if (bLegacyOutputName)
 	{
-		OutputStem = WidgetBP->GetName();
+		OutputStem = WidgetStem;
 	}
 	else if (!Options.OutputName.IsEmpty())
 	{
@@ -3477,7 +3518,7 @@ FWidgetPreviewResult UWidgetService::CapturePreviewInternal(
 	}
 	else
 	{
-		OutputStem = FString::Printf(TEXT("%s_%s_%dx%d"), *WidgetBP->GetName(), *StateLower, Width, Height);
+		OutputStem = FString::Printf(TEXT("%s_%s_%dx%d"), *WidgetStem, *StateLower, Width, Height);
 	}
 	const FString OutputPath = FPaths::Combine(OutputDir, OutputStem + TEXT(".png"));
 
