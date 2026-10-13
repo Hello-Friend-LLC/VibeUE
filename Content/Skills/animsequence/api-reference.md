@@ -189,8 +189,8 @@ combined = AnimSequenceService.multiply_quats(a, b) -> Quat
 
 ### Query Methods
 ```python
-# Get animation info - RETURNS AnimSequenceInfo (not bool with out-param!)
-info = AnimSequenceService.get_anim_sequence_info(anim_path) -> AnimSequenceInfo
+# Get animation info - RETURNS VibeAnimSequenceInfo (not bool with out-param!)
+info = AnimSequenceService.get_anim_sequence_info(anim_path) -> VibeAnimSequenceInfo
 
 # Get animated bone names
 bones = AnimSequenceService.get_animated_bones(anim_path) -> Array[str]

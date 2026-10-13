@@ -10,7 +10,7 @@
  * Comprehensive information about an Animation Sequence asset
  */
 USTRUCT(BlueprintType)
-struct FAnimSequenceInfo
+struct FVibeAnimSequenceInfo
 {
 	GENERATED_BODY()
 
@@ -559,7 +559,7 @@ public:
 	 * @return Array of animation sequence info structs
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Animation|Discovery")
-	static TArray<FAnimSequenceInfo> ListAnimSequences(
+	static TArray<FVibeAnimSequenceInfo> ListAnimSequences(
 		const FString& SearchPath = TEXT("/Game"),
 		const FString& SkeletonFilter = TEXT(""));
 
@@ -573,7 +573,7 @@ public:
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Animation|Discovery")
 	static bool GetAnimSequenceInfo(
 		const FString& AnimPath,
-		FAnimSequenceInfo& OutInfo);
+		FVibeAnimSequenceInfo& OutInfo);
 
 	/**
 	 * Find all animations compatible with a specific skeleton.
@@ -582,7 +582,7 @@ public:
 	 * @return Array of animation sequence info structs
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Animation|Discovery")
-	static TArray<FAnimSequenceInfo> FindAnimationsForSkeleton(const FString& SkeletonPath);
+	static TArray<FVibeAnimSequenceInfo> FindAnimationsForSkeleton(const FString& SkeletonPath);
 
 	/**
 	 * Search animations by name pattern.
@@ -592,7 +592,7 @@ public:
 	 * @return Array of matching animation info structs
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Animation|Discovery")
-	static TArray<FAnimSequenceInfo> SearchAnimations(
+	static TArray<FVibeAnimSequenceInfo> SearchAnimations(
 		const FString& NamePattern,
 		const FString& SearchPath = TEXT("/Game"));
 
@@ -1919,5 +1919,5 @@ private:
 	static FString TangentModeToString(int32 Mode);
 
 	/** Fill animation info struct from animation sequence */
-	static void FillAnimSequenceInfo(class UAnimSequence* AnimSeq, FAnimSequenceInfo& OutInfo);
+	static void FillAnimSequenceInfo(class UAnimSequence* AnimSeq, FVibeAnimSequenceInfo& OutInfo);
 };

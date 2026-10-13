@@ -313,7 +313,7 @@ if results:
 Load these sibling docs for deeper coverage of specific topics:
 
 - **api-reference.md** - Full Python API reference (SkeletonService profile/constraint methods, AnimSequenceService preview/edit/pose/visual capture, creation/helper/query methods, key structs). Also contains the secondary skill manifest for the merged "Animation Sequence Skill" content set.
-- **data-structures.md** - Key data structures (FSkeletonProfile, FBoneConstraint, FLearnedBoneRange, FAnimationEditResult, FAnimationPoseCaptureResult, FBoneDelta) and full DTO reference (AnimSequenceInfo, BoneTrackData, AnimKeyframe, BonePose, AnimCurveInfo, CurveKeyframe, AnimNotifyInfo, SyncMarkerInfo).
+- **data-structures.md** - Key data structures (FSkeletonProfile, FBoneConstraint, FLearnedBoneRange, FAnimationEditResult, FAnimationPoseCaptureResult, FBoneDelta) and full DTO reference (VibeAnimSequenceInfo, BoneTrackData, AnimKeyframe, BonePose, AnimCurveInfo, CurveKeyframe, AnimNotifyInfo, SyncMarkerInfo).
 - **workflows.md** - Editing workflows (inspect, preview/validate single bone, multi-bone atomic, manual constraints, learn from animations, copy/mirror pose, retarget preview) and creation workflows (from reference pose, from keyframe data, simple keyframes, rotation keyframes, wave animation example).
 - **patterns.md** - Common patterns (listing animations, getting pose at time, adding curves, managing/configuring notifies) and the CRITICAL RULES checklist for creation/notify operations and asset paths.
 - **method-categories.md** - Categorised table of every AnimSequenceService method by domain (Discovery, Creation, Helpers, Properties, Bone Tracks, Poses, Curves, Notifies, Notify Tracks, Sync Markers, Root Motion, Additive, Compression, Export, Editor).

@@ -202,7 +202,7 @@ FString UAnimSequenceService::TangentModeToString(int32 Mode)
 	}
 }
 
-void UAnimSequenceService::FillAnimSequenceInfo(UAnimSequence* AnimSeq, FAnimSequenceInfo& OutInfo)
+void UAnimSequenceService::FillAnimSequenceInfo(UAnimSequence* AnimSeq, FVibeAnimSequenceInfo& OutInfo)
 {
 	if (!AnimSeq)
 	{
@@ -252,11 +252,11 @@ void UAnimSequenceService::FillAnimSequenceInfo(UAnimSequence* AnimSeq, FAnimSeq
 // ANIMATION DISCOVERY
 // ============================================================================
 
-TArray<FAnimSequenceInfo> UAnimSequenceService::ListAnimSequences(
+TArray<FVibeAnimSequenceInfo> UAnimSequenceService::ListAnimSequences(
 	const FString& SearchPath,
 	const FString& SkeletonFilter)
 {
-	TArray<FAnimSequenceInfo> Results;
+	TArray<FVibeAnimSequenceInfo> Results;
 
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
@@ -282,7 +282,7 @@ TArray<FAnimSequenceInfo> UAnimSequenceService::ListAnimSequences(
 		}
 
 		// Skip loading - just get basic info from AssetData
-		FAnimSequenceInfo Info;
+		FVibeAnimSequenceInfo Info;
 		Info.AnimPath = Asset.GetObjectPathString();
 		Info.AnimName = Asset.AssetName.ToString();
 		
@@ -332,7 +332,7 @@ TArray<FAnimSequenceInfo> UAnimSequenceService::ListAnimSequences(
 	return Results;
 }
 
-bool UAnimSequenceService::GetAnimSequenceInfo(const FString& AnimPath, FAnimSequenceInfo& OutInfo)
+bool UAnimSequenceService::GetAnimSequenceInfo(const FString& AnimPath, FVibeAnimSequenceInfo& OutInfo)
 {
 	UAnimSequence* AnimSeq = LoadAnimSequence(AnimPath);
 	if (!AnimSeq)
@@ -344,9 +344,9 @@ bool UAnimSequenceService::GetAnimSequenceInfo(const FString& AnimPath, FAnimSeq
 	return true;
 }
 
-TArray<FAnimSequenceInfo> UAnimSequenceService::FindAnimationsForSkeleton(const FString& SkeletonPath)
+TArray<FVibeAnimSequenceInfo> UAnimSequenceService::FindAnimationsForSkeleton(const FString& SkeletonPath)
 {
-	TArray<FAnimSequenceInfo> Results;
+	TArray<FVibeAnimSequenceInfo> Results;
 
 	if (SkeletonPath.IsEmpty())
 	{
@@ -421,7 +421,7 @@ TArray<FAnimSequenceInfo> UAnimSequenceService::FindAnimationsForSkeleton(const 
 		}
 
 		// Build info from asset registry tags WITHOUT loading the asset
-		FAnimSequenceInfo Info;
+		FVibeAnimSequenceInfo Info;
 		Info.AnimPath = Asset.GetObjectPathString();
 		Info.AnimName = Asset.AssetName.ToString();
 		Info.SkeletonPath = TagSkeletonPath;
@@ -463,11 +463,11 @@ TArray<FAnimSequenceInfo> UAnimSequenceService::FindAnimationsForSkeleton(const 
 	return Results;
 }
 
-TArray<FAnimSequenceInfo> UAnimSequenceService::SearchAnimations(
+TArray<FVibeAnimSequenceInfo> UAnimSequenceService::SearchAnimations(
 	const FString& NamePattern,
 	const FString& SearchPath)
 {
-	TArray<FAnimSequenceInfo> Results;
+	TArray<FVibeAnimSequenceInfo> Results;
 
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
@@ -515,7 +515,7 @@ TArray<FAnimSequenceInfo> UAnimSequenceService::SearchAnimations(
 				}
 			}
 			
-			FAnimSequenceInfo Info;
+			FVibeAnimSequenceInfo Info;
 			FillAnimSequenceInfo(AnimSeq, Info);
 			Results.Add(Info);
 		}

@@ -1,6 +1,6 @@
 ---
 name: animsequence-data-structures
-description: Key data structures (FSkeletonProfile, FBoneConstraint, FLearnedBoneRange, edit/capture results, FBoneDelta) and full DTO reference (AnimSequenceInfo, BoneTrackData, AnimKeyframe, BonePose, AnimCurveInfo, CurveKeyframe, AnimNotifyInfo, SyncMarkerInfo) for animation sequence work.
+description: Key data structures (FSkeletonProfile, FBoneConstraint, FLearnedBoneRange, edit/capture results, FBoneDelta) and full DTO reference (VibeAnimSequenceInfo, BoneTrackData, AnimKeyframe, BonePose, AnimCurveInfo, CurveKeyframe, AnimNotifyInfo, SyncMarkerInfo) for animation sequence work.
 ---
 
 # Animation Sequence Data Structures
@@ -86,7 +86,7 @@ delta.scale_delta = unreal.Vector(1, 1, 1)        # Multiplicative
 >
 > **ALWAYS use discovery tools to verify property names when unsure!**
 
-### AnimSequenceInfo
+### VibeAnimSequenceInfo
 - `anim_path` - Full path to animation asset
 - `anim_name` - Asset name
 - `skeleton_path` - Skeleton asset path
