@@ -80,7 +80,28 @@ namespace
 
 	bool IsAssertion(const FString& Action)
 	{
-		return Action == TEXT("assert_log") || Action == TEXT("python_assert") || Action == TEXT("python_assert_number");
+		return Action == TEXT("assert_log") || Action == TEXT("python_assert") || Action == TEXT("python_assert_number") || Action == TEXT("wait_until");
+	}
+
+	// Evaluates one Python expression through the editor's Python bridge and returns its repr (the bridge only
+	// hands back PyObject_Repr text) or, when evaluation fails, the error text. Shared by python_assert,
+	// python_assert_number, click_widget and wait_until.
+	static bool EvalPythonRepr(const FString& Expr, FString& OutRepr)
+	{
+		FPythonCommandEx Command; Command.Command = Expr; Command.ExecutionMode = EPythonCommandExecutionMode::EvaluateStatement;
+		IPythonScriptPlugin* Python = IPythonScriptPlugin::Get();
+		const bool bExecuted = Python && Python->ExecPythonCommandEx(Command);
+		OutRepr = Command.CommandResult;
+		return bExecuted;
+	}
+
+	// click_widget targets come back as a Python str repr: accept only a plain single-quoted one (no backslash,
+	// so no escapes to undo) and strip the quotes.
+	bool UnquoteWidgetPathRepr(const FString& Repr, FString& OutPath)
+	{
+		if (Repr.Len() < 3 || !Repr.StartsWith(TEXT("'")) || !Repr.EndsWith(TEXT("'")) || Repr.Contains(TEXT("\\"))) { return false; }
+		OutPath = Repr.Mid(1, Repr.Len() - 2);
+		return !OutPath.Contains(TEXT("'"));
 	}
 
 	FString HashText(const FString& Text)
@@ -242,8 +263,54 @@ namespace
 			else if (Action == TEXT("inject_key"))
 			{
 				FString Event = TEXT("tap"); Step->TryGetStringField(TEXT("event"), Event); FString Error;
-				const bool bOk = JsonSuccess(UInputService::InjectKey(Step->GetStringField(TEXT("key")), Event), Error);
+				double HoldSeconds = 0.0; Step->TryGetNumberField(TEXT("hold_seconds"), HoldSeconds);
+				// focus:"keep" leaves Slate/UMG focus where it is (a focused menu gets the key); default refocuses the game viewport.
+				FString Focus; Step->TryGetStringField(TEXT("focus"), Focus); const bool bFocusGameViewport = !Focus.Equals(TEXT("keep"), ESearchCase::IgnoreCase);
+				const bool bOk = JsonSuccess(UInputService::InjectKey(Step->GetStringField(TEXT("key")), Event, static_cast<float>(HoldSeconds), bFocusGameViewport), Error);
 				AddScenarioStepResult(Scenario, Action, bOk, Error);
+			}
+			else if (Action == TEXT("click_widget"))
+			{
+				FString Expression, Button = TEXT("left"); Step->TryGetStringField(TEXT("expression"), Expression); Step->TryGetStringField(TEXT("button"), Button);
+				bool bDouble = false; Step->TryGetBoolField(TEXT("double"), bDouble);
+				const FString Expected = TEXT("str repr of a live PIE widget object path");
+				FString Repr, Path;
+				if (!EvalPythonRepr(Expression, Repr))
+				{
+					AddScenarioStepResult(Scenario, Action, false, TEXT("TARGET_NOT_STRING: target expression raised"), Repr, Expected);
+				}
+				else if (!UnquoteWidgetPathRepr(Repr, Path))
+				{
+					AddScenarioStepResult(Scenario, Action, false, TEXT("TARGET_NOT_STRING: target expression did not return a plain single-quoted str"), Repr, Expected);
+				}
+				else
+				{
+					const FString ClickJson = UInputService::InjectClick(Path, Button, bDouble); FString Error;
+					const bool bOk = JsonSuccess(ClickJson, Error);
+					FString Code; TSharedPtr<FJsonObject> ClickObj;
+					if (!bOk && FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(ClickJson), ClickObj) && ClickObj.IsValid()) { ClickObj->TryGetStringField(TEXT("error_code"), Code); }
+					AddScenarioStepResult(Scenario, Action, bOk, bOk ? FString() : (Code.IsEmpty() ? Error : Code + TEXT(": ") + Error),
+						Code == TEXT("WIDGET_NOT_FOUND") ? Repr : ClickJson, bOk ? FString() : Expected);
+				}
+			}
+			else if (Action == TEXT("wait_until"))
+			{
+				// Multi-tick: re-evaluates every poll_seconds (no result = still pending) until the repr equals
+				// expected (passed) or timeout_seconds elapses (failed, with the last repr or error as actual).
+				if (Now >= Scenario->WaitUntil)
+				{
+					FString Expression, Expected; Step->TryGetStringField(TEXT("expression"), Expression); Step->TryGetStringField(TEXT("expected"), Expected);
+					double Timeout = 0.0, Poll = 0.1; Step->TryGetNumberField(TEXT("timeout_seconds"), Timeout); Step->TryGetNumberField(TEXT("poll_seconds"), Poll);
+					Timeout = FMath::Clamp(Timeout, 0.0, 300.0); Poll = FMath::Clamp(Poll, 0.01, 10.0);
+					FString Repr; const bool bExecuted = EvalPythonRepr(Expression, Repr);
+					const double Deadline = Scenario->StepStartedSeconds + Timeout;
+					if (bExecuted && Repr == Expected) { AddScenarioStepResult(Scenario, Action, true, FString(), Repr, Expected); }
+					else if (Now >= Deadline)
+					{
+						AddScenarioStepResult(Scenario, Action, false, FString::Printf(TEXT("wait_until timed out after %.2fs%s"), Timeout, bExecuted ? TEXT("") : TEXT(" (last evaluation raised)")), Repr, Expected);
+					}
+					else { Scenario->WaitUntil = FMath::Min(Now + Poll, Deadline); }
+				}
 			}
 			else if (Action == TEXT("assert_log"))
 			{
@@ -256,29 +323,25 @@ namespace
 			else if (Action == TEXT("python_assert"))
 			{
 				FString Expression, Expected; Step->TryGetStringField(TEXT("expression"), Expression); Step->TryGetStringField(TEXT("expected"), Expected);
-				FPythonCommandEx Command; Command.Command = Expression; Command.ExecutionMode = EPythonCommandExecutionMode::EvaluateStatement;
-				IPythonScriptPlugin* Python = IPythonScriptPlugin::Get(); const bool bExecuted = Python && Python->ExecPythonCommandEx(Command);
-				const bool bOk = bExecuted && Command.CommandResult == Expected;
-				AddScenarioStepResult(Scenario, Action, bOk, bOk ? FString() : TEXT("Python assertion failed"), Command.CommandResult, Expected);
+				FString Repr; const bool bExecuted = EvalPythonRepr(Expression, Repr);
+				const bool bOk = bExecuted && Repr == Expected;
+				AddScenarioStepResult(Scenario, Action, bOk, bOk ? FString() : TEXT("Python assertion failed"), Repr, Expected);
 			}
 			else if (Action == TEXT("python_assert_number"))
 			{
-				FPythonCommandEx Command; Command.Command = Step->GetStringField(TEXT("expression"));
-				Command.ExecutionMode = EPythonCommandExecutionMode::EvaluateStatement;
-				IPythonScriptPlugin* Python = IPythonScriptPlugin::Get();
-				const bool bExecuted = Python && Python->ExecPythonCommandEx(Command);
+				FString Repr; const bool bExecuted = EvalPythonRepr(Step->GetStringField(TEXT("expression")), Repr);
 				double Actual = 0.0; const double Expected = Step->GetNumberField(TEXT("expected"));
 				double Tolerance = 0.0; Step->TryGetNumberField(TEXT("tolerance"), Tolerance);
 				const FString Op = Step->GetStringField(TEXT("operator"));
 				// Unreal's JSON reader expects a container at the root. Wrapping also rejects
 				// Python strings, booleans, NaN/Inf and multiple values instead of coercing them.
 				TArray<TSharedPtr<FJsonValue>> Numbers;
-				const bool bNumeric = bExecuted && FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(TEXT("[") + Command.CommandResult + TEXT("]")), Numbers) &&
+				const bool bNumeric = bExecuted && FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(TEXT("[") + Repr + TEXT("]")), Numbers) &&
 					Numbers.Num() == 1 && Numbers[0]->Type == EJson::Number && Numbers[0]->TryGetNumber(Actual) && FMath::IsFinite(Actual);
 				const bool bOk = bNumeric && (Op == TEXT("eq") ? FMath::Abs(Actual - Expected) <= Tolerance :
 					Op == TEXT("lt") ? Actual < Expected : Op == TEXT("le") ? Actual <= Expected :
 					Op == TEXT("gt") ? Actual > Expected : Actual >= Expected);
-				AddScenarioStepResult(Scenario, Action, bOk, bOk ? FString() : TEXT("numeric Python assertion failed"), Command.CommandResult,
+				AddScenarioStepResult(Scenario, Action, bOk, bOk ? FString() : TEXT("numeric Python assertion failed"), Repr,
 					FString::Printf(TEXT("%s %.17g (tolerance %.17g)"), *Op, Expected, Tolerance));
 			}
 			else if (Action == TEXT("capture_game"))
@@ -322,6 +385,22 @@ FString UWorkflowService::RunScenario(const FString& ScenarioJson)
 		const auto Step = Value->AsObject(); FString Action;
 		if (!Step || !Step->TryGetStringField(TEXT("action"), Action)) { return ScenarioError(TEXT("each step requires an action")); }
 		Action = Action.ToLower();
+		if (Action == TEXT("click_widget"))
+		{
+			FString Expression, Button = TEXT("left"); bool bDouble = false;
+			if (!Step->TryGetStringField(TEXT("expression"), Expression) || Expression.TrimStartAndEnd().IsEmpty()) { return ScenarioError(TEXT("click_widget requires expression")); }
+			if (Step->HasField(TEXT("button")) && (!Step->TryGetStringField(TEXT("button"), Button) ||
+				!(Button.Equals(TEXT("left"), ESearchCase::IgnoreCase) || Button.Equals(TEXT("right"), ESearchCase::IgnoreCase) || Button.Equals(TEXT("middle"), ESearchCase::IgnoreCase))))
+			{ return ScenarioError(TEXT("click_widget button must be left, right or middle")); }
+			if (Step->HasField(TEXT("double")) && (!Step->HasTypedField<EJson::Boolean>(TEXT("double")) || !Step->TryGetBoolField(TEXT("double"), bDouble))) { return ScenarioError(TEXT("click_widget double must be boolean")); }
+			continue;
+		}
+		if (Action == TEXT("inject_key") && Step->HasField(TEXT("focus")))
+		{
+			FString Focus;
+			if (!Step->TryGetStringField(TEXT("focus"), Focus) || !(Focus.Equals(TEXT("keep"), ESearchCase::IgnoreCase) || Focus.Equals(TEXT("viewport"), ESearchCase::IgnoreCase)))
+			{ return ScenarioError(TEXT("inject_key focus must be keep or viewport")); }
+		}
 		if (!IsAssertion(Action)) { continue; }
 		++AssertionsDeclared;
 		FString Expression, Expected, Contains, NotContains;
@@ -336,6 +415,15 @@ FString UWorkflowService::RunScenario(const FString& ScenarioJson)
 			if (Action == TEXT("python_assert"))
 			{
 				if (!Step->TryGetStringField(TEXT("expected"), Expected)) { return ScenarioError(TEXT("python_assert requires string expected")); }
+			}
+			else if (Action == TEXT("wait_until"))
+			{
+				double Timeout = 0.0, Poll = 0.1;
+				if (!Step->HasTypedField<EJson::String>(TEXT("expected")) || !Step->TryGetStringField(TEXT("expected"), Expected)) { return ScenarioError(TEXT("wait_until requires string expected")); }
+				if (!Step->HasTypedField<EJson::Number>(TEXT("timeout_seconds")) || !Step->TryGetNumberField(TEXT("timeout_seconds"), Timeout) || !FMath::IsFinite(Timeout) || Timeout <= 0.0 || Timeout > 300.0)
+				{ return ScenarioError(TEXT("wait_until requires timeout_seconds in (0, 300]")); }
+				if (Step->HasField(TEXT("poll_seconds")) && (!Step->HasTypedField<EJson::Number>(TEXT("poll_seconds")) || !Step->TryGetNumberField(TEXT("poll_seconds"), Poll) || !FMath::IsFinite(Poll) || Poll < 0.01 || Poll > 10.0))
+				{ return ScenarioError(TEXT("wait_until poll_seconds must be in [0.01, 10]")); }
 			}
 			else
 			{

@@ -250,6 +250,8 @@ struct FInputTypeDiscoveryResult
  * - inject_action_for: Hold an Enhanced Input action value for a number of seconds, then release it
  * - stop_injection: Release an action that inject_action_for is holding
  * - inject_key: Send a key press to the PIE game viewport via Slate (no OS focus needed)
+ * - inject_click: Hover then click a live PIE widget (by object path) via Slate pointer events, OS cursor untouched
+ * - inject_hover: Move the Slate pointer over a live PIE widget (by object path), OS cursor untouched
  *
  * Python Usage:
  *   import unreal
@@ -676,7 +678,8 @@ public:
 
 	/**
 	 * Send a key event to the running PIE game viewport through Slate (no OS focus, no SendKeys).
-	 * Slate focus is moved to the game viewport first, so this works with the editor unfocused.
+	 * By default Slate focus is moved to the game viewport first, so this works with the editor unfocused;
+	 * bFocusGameViewport=false keeps the current Slate/UMG focus (e.g. a focused menu widget receives the key).
 	 *
 	 * Requires Play In Editor, not Simulate In Editor: a Simulate session has no player game viewport,
 	 * so the synthesized events would be dropped — it is rejected with SIMULATE_NOT_PLAY instead.
@@ -692,16 +695,59 @@ public:
 	 *        already held extends it (no second key-down, reply extended: true, released HoldSeconds from now);
 	 *        an "up" or "tap" ends a pending hold. Ending PIE cancels a pending hold without sending its key-up.
 	 * @param HoldSeconds - For "hold": how long, 0.05 to 60
-	 * @return JSON: {success, key, event, handled_down, handled_up, [extended, hold_seconds]} or
+	 * @param bFocusGameViewport - true (default): SetAllUserFocusToGameViewport before the event (and before a
+	 *        hold's delayed key-up). false: keep the current Slate focus, so a focused UMG/Slate widget gets the key.
+	 * @return JSON: {success, key, event, handled_down, handled_up, focus_game_viewport, [extended, hold_seconds]} or
 	 *         {success:false, error_code, error_message}
 	 *         error_code: PIE_NOT_RUNNING, SIMULATE_NOT_PLAY, NO_SLATE, UNKNOWN_KEY, BAD_EVENT, BAD_DURATION
 	 *
 	 * Example:
 	 *   unreal.InputService.inject_key("SpaceBar")                          # tap space in PIE
 	 *   unreal.InputService.inject_key("RightMouseButton", "hold", 1.5)     # hold it 1.5 s
+	 *   unreal.InputService.inject_key("Down", "tap", 0.0, False)           # keep UMG focus (menu navigation)
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Input|PIE")
-	static FString InjectKey(const FString& KeyName, const FString& EventType = TEXT("tap"), float HoldSeconds = 0.0f);
+	static FString InjectKey(const FString& KeyName, const FString& EventType = TEXT("tap"), float HoldSeconds = 0.0f, bool bFocusGameViewport = true);
+
+	/**
+	 * Hover then click a live PIE widget through Slate pointer events at the centre of its tick-space geometry:
+	 * application activation, a mouse move onto the widget, then button down and up (and, for bDouble, a
+	 * double-click event and a second up). The OS cursor is never moved (no SetCursorPos, no SendInput) and
+	 * Slate keyboard focus is not changed by this call; cursor_before/cursor_after read the OS cursor so a
+	 * caller can prove it stayed put.
+	 *
+	 * The widget must be live and laid out: found by full object path, holding a cached Slate widget that is in
+	 * a Slate window, with a non-zero size. There is no headless fallback: anything else is refused.
+	 *
+	 * handled_down / handled_up report whether a Slate widget CONSUMED the event; confirm the product outcome
+	 * (a menu opened, an item moved) from game/UI state, not from these flags.
+	 *
+	 * @param WidgetObjectPath - Full object path of a UWidget in the PIE world (Python: widget.get_path_name())
+	 * @param Button - "left" (default), "right" or "middle"
+	 * @param bDouble - Also send a double-click event after the first click
+	 * @return JSON: {success, ok, handled_move, handled_down, handled_up, [handled_double], button, widget_path,
+	 *         position:[x,y], cursor_before:[x,y], cursor_after:[x,y], error} or the same with success/ok false and
+	 *         error_code + error_message. error_code: PIE_NOT_RUNNING, SIMULATE_NOT_PLAY, NO_SLATE, BAD_BUTTON,
+	 *         WIDGET_NOT_FOUND, WIDGET_NOT_IN_PIE, NO_SLATE_WIDGET, NOT_IN_WINDOW, ZERO_GEOMETRY
+	 *
+	 * Example:
+	 *   unreal.InputService.inject_click(entry.get_path_name(), "right")   # open an item context menu
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Input|PIE")
+	static FString InjectClick(const FString& WidgetObjectPath, const FString& Button = TEXT("left"), bool bDouble = false);
+
+	/**
+	 * Move the Slate pointer onto the centre of a live PIE widget (application activation, then one mouse
+	 * move event). Same target rules, refusals and cursor fields as inject_click; the OS cursor is not moved.
+	 * Slate re-synthesizes a mouse move from the real OS cursor on later ticks, so a hover state can end
+	 * on the next frames; assert hover-driven outcomes promptly.
+	 *
+	 * @param WidgetObjectPath - Full object path of a UWidget in the PIE world
+	 * @return JSON: {success, ok, handled_move, widget_path, position:[x,y], cursor_before:[x,y],
+	 *         cursor_after:[x,y], error} or the refusal shape of inject_click
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Input|PIE")
+	static FString InjectHover(const FString& WidgetObjectPath);
 
 private:
 	/** Helper to load an Input Action */

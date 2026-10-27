@@ -23,6 +23,10 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerInput.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Components/Widget.h"
+#include "Engine/World.h"
+#include "GenericPlatform/ICursor.h"
+#include "Widgets/SWindow.h"
 #include "Containers/Ticker.h"
 #include "Editor/EditorEngine.h"
 #include "Engine/Engine.h"
@@ -1374,7 +1378,9 @@ namespace VibeUEInputInjection
 
 	// Ends a held key. bSendKeyUp: send its key-up to the PIE game viewport, and only while PIE runs — with no
 	// session it would land on whichever editor widget has focus. Without it the caller sends its own key-up.
-	static bool ReleaseHeldKey(const FKey& Key, bool bSendKeyUp, bool bFromTicker = false)
+	// bFocusGameViewport: the hold's own focus choice (inject_key's flag), so a focus-keeping hold releases into
+	// the same widget it pressed into.
+	static bool ReleaseHeldKey(const FKey& Key, bool bSendKeyUp, bool bFromTicker = false, bool bFocusGameViewport = true)
 	{
 		FTSTicker::FDelegateHandle Release;
 		if (!GHeldKeys.RemoveAndCopyValue(Key, Release))
@@ -1388,7 +1394,10 @@ namespace VibeUEInputInjection
 		if (bSendKeyUp && GEditor && GEditor->PlayWorld && FSlateApplication::IsInitialized())
 		{
 			FSlateApplication& SlateApp = FSlateApplication::Get();
-			SlateApp.SetAllUserFocusToGameViewport();
+			if (bFocusGameViewport)
+			{
+				SlateApp.SetAllUserFocusToGameViewport();
+			}
 			FKeyEvent UpEvent(Key, FModifierKeysState(), /*UserIndex=*/0, /*bIsRepeat=*/false, /*CharacterCode=*/0, /*KeyCode=*/0);
 			SlateApp.ProcessKeyUpEvent(UpEvent);
 		}
@@ -1534,7 +1543,7 @@ FString UInputService::StopInjection(const FString& ActionPath, int32 PieInstanc
 	return InjectionOkJson(R);
 }
 
-FString UInputService::InjectKey(const FString& KeyName, const FString& EventType, float HoldSeconds)
+FString UInputService::InjectKey(const FString& KeyName, const FString& EventType, float HoldSeconds, bool bFocusGameViewport)
 {
 	if (!GEditor || !GEditor->PlayWorld)
 	{
@@ -1572,8 +1581,12 @@ FString UInputService::InjectKey(const FString& KeyName, const FString& EventTyp
 
 	FSlateApplication& Slate = FSlateApplication::Get();
 	// Route the synthesized event to the game: Slate focus is app-internal, so this works even when
-	// the OS focus is elsewhere — the whole point versus SendKeys.
-	Slate.SetAllUserFocusToGameViewport();
+	// the OS focus is elsewhere — the whole point versus SendKeys. bFocusGameViewport=false keeps the
+	// current Slate focus, so a focused UMG/Slate widget (a menu) receives the key instead.
+	if (bFocusGameViewport)
+	{
+		Slate.SetAllUserFocusToGameViewport();
+	}
 
 	// A hold of a key that is already held extends that hold: no second key-down (the game would see a
 	// second press), and its one pending release moves to HoldSeconds from now — two timers would let the
@@ -1609,9 +1622,9 @@ FString UInputService::InjectKey(const FString& KeyName, const FString& EventTyp
 	{
 		// The release, later. The editor stays off its background frame rate meanwhile, and ending PIE first
 		// cancels it (see OnEndPie).
-		const FTSTicker::FDelegateHandle Release = VibeUEInputInjection::AddWallClockRelease(HoldSeconds, [Key]()
+		const FTSTicker::FDelegateHandle Release = VibeUEInputInjection::AddWallClockRelease(HoldSeconds, [Key, bFocusGameViewport]()
 		{
-			VibeUEInputInjection::ReleaseHeldKey(Key, /*bSendKeyUp=*/true, /*bFromTicker=*/true);
+			VibeUEInputInjection::ReleaseHeldKey(Key, /*bSendKeyUp=*/true, /*bFromTicker=*/true, bFocusGameViewport);
 		});
 		VibeUEInputInjection::GHeldKeys.Add(Key, Release);
 		VibeUEInputInjection::UpdateThrottleScope();
@@ -1622,10 +1635,238 @@ FString UInputService::InjectKey(const FString& KeyName, const FString& EventTyp
 	R->SetStringField(TEXT("event"), EventType.ToLower());
 	R->SetBoolField(TEXT("handled_down"), bHandledDown);
 	R->SetBoolField(TEXT("handled_up"), bHandledUp);
+	R->SetBoolField(TEXT("focus_game_viewport"), bFocusGameViewport);
 	if (bHold)
 	{
 		R->SetBoolField(TEXT("extended"), bExtended);
 		R->SetNumberField(TEXT("hold_seconds"), HoldSeconds);
 	}
 	return InjectionOkJson(R);
+}
+
+// =================================================================
+// PIE pointer injection: InjectClick / InjectHover (lifted from UESpec FUESpecTestRunner::ExecuteClick /
+// HoverWidget, minus their SetKeyboardFocus and headless fallback; DEC-5325)
+// =================================================================
+
+namespace VibeUEPointerInjection
+{
+	static TArray<TSharedPtr<FJsonValue>> PointJson(const FVector2D& P)
+	{
+		TArray<TSharedPtr<FJsonValue>> A;
+		A.Add(MakeShared<FJsonValueNumber>(P.X));
+		A.Add(MakeShared<FJsonValueNumber>(P.Y));
+		return A;
+	}
+
+	// The OS cursor as the platform reports it (Windows: ::GetCursorPos). Read only; nothing here sets it.
+	static FVector2D ReadOsCursor()
+	{
+		if (FSlateApplication::IsInitialized())
+		{
+			if (const TSharedPtr<ICursor> Cursor = FSlateApplication::Get().GetPlatformCursor())
+			{
+				return Cursor->GetPosition();
+			}
+		}
+		return FVector2D(-1.0, -1.0);
+	}
+
+	static FString Serialize(const TSharedRef<FJsonObject>& Obj)
+	{
+		FString Out;
+		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
+		FJsonSerializer::Serialize(Obj, Writer);
+		return Out;
+	}
+
+	// One result shape for success and refusal: callers (the scenario click_widget step) store it verbatim.
+	static TSharedRef<FJsonObject> NewResult(const FString& WidgetPath, const FVector2D& CursorBefore)
+	{
+		TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+		R->SetStringField(TEXT("widget_path"), WidgetPath);
+		R->SetArrayField(TEXT("cursor_before"), PointJson(CursorBefore));
+		return R;
+	}
+
+	static FString Refuse(const TSharedRef<FJsonObject>& R, const FString& Code, const FString& Message)
+	{
+		R->SetBoolField(TEXT("success"), false);
+		R->SetBoolField(TEXT("ok"), false);
+		R->SetStringField(TEXT("error_code"), Code);
+		R->SetStringField(TEXT("error_message"), Message);
+		R->SetStringField(TEXT("error"), Code + TEXT(": ") + Message);
+		R->SetArrayField(TEXT("cursor_after"), PointJson(ReadOsCursor()));
+		return Serialize(R);
+	}
+
+	static FString Finish(const TSharedRef<FJsonObject>& R)
+	{
+		R->SetBoolField(TEXT("success"), true);
+		R->SetBoolField(TEXT("ok"), true);
+		R->SetStringField(TEXT("error"), FString());
+		R->SetArrayField(TEXT("cursor_after"), PointJson(ReadOsCursor()));
+		return Serialize(R);
+	}
+
+	struct FPointerTarget
+	{
+		TSharedPtr<SWidget> SlateWidget;
+		TSharedPtr<FGenericWindow> NativeWindow;
+		FVector2D Position = FVector2D::ZeroVector;
+	};
+
+	// Resolves a live, laid-out PIE widget. Returns an empty string on success, else "CODE\nmessage".
+	static FString ResolveTarget(const FString& WidgetObjectPath, FPointerTarget& Out)
+	{
+		if (!GEditor || !GEditor->PlayWorld)
+		{
+			return TEXT("PIE_NOT_RUNNING\nPIE is not running: pointer injection targets a PIE widget.");
+		}
+		if (GEditor->IsSimulatingInEditor())
+		{
+			return TEXT("SIMULATE_NOT_PLAY\nThe session is Simulate In Editor, which has no player game viewport.");
+		}
+		if (!FSlateApplication::IsInitialized())
+		{
+			return TEXT("NO_SLATE\nSlate is not initialized.");
+		}
+		UWidget* Widget = WidgetObjectPath.IsEmpty() ? nullptr : FindObject<UWidget>(nullptr, *WidgetObjectPath);
+		if (!Widget)
+		{
+			return FString::Printf(TEXT("WIDGET_NOT_FOUND\nNo UWidget at object path '%s'."), *WidgetObjectPath);
+		}
+		// A widget with a known world must be in a PIE world: an editor-world/designer widget is never a target.
+		if (const UWorld* World = Widget->GetWorld())
+		{
+			if (World->WorldType != EWorldType::PIE)
+			{
+				return FString::Printf(TEXT("WIDGET_NOT_IN_PIE\nWidget '%s' belongs to a non-PIE world (%s)."), *WidgetObjectPath, *World->GetName());
+			}
+		}
+		// The cached Slate widget only: TakeWidget would build a fresh, unattached one.
+		const TSharedPtr<SWidget> SlateWidget = Widget->GetCachedWidget();
+		if (!SlateWidget.IsValid())
+		{
+			return FString::Printf(TEXT("NO_SLATE_WIDGET\nWidget '%s' has no live Slate widget (not constructed or removed)."), *WidgetObjectPath);
+		}
+		FSlateApplication& Slate = FSlateApplication::Get();
+		const TSharedPtr<SWindow> Window = Slate.FindWidgetWindow(SlateWidget.ToSharedRef());
+		if (!Window.IsValid())
+		{
+			return FString::Printf(TEXT("NOT_IN_WINDOW\nWidget '%s' is not attached to a Slate window."), *WidgetObjectPath);
+		}
+		const FGeometry Geometry = SlateWidget->GetTickSpaceGeometry();
+		const FVector2D LocalSize = FVector2D(Geometry.GetLocalSize());
+		const FVector2D AbsoluteSize = FVector2D(Geometry.GetAbsoluteSize());
+		if (LocalSize.X <= 0.0 || LocalSize.Y <= 0.0 || AbsoluteSize.X <= 0.0 || AbsoluteSize.Y <= 0.0)
+		{
+			return FString::Printf(TEXT("ZERO_GEOMETRY\nWidget '%s' has no laid-out size yet (%.1f x %.1f); retry on a later tick."), *WidgetObjectPath, LocalSize.X, LocalSize.Y);
+		}
+		Out.SlateWidget = SlateWidget;
+		Out.NativeWindow = Window->GetNativeWindow();
+		// The geometry centre in absolute (screen) space; LocalToAbsolute honours DPI scale and render transforms.
+		const FVector2f HalfLocalSize = FVector2f(LocalSize * 0.5);
+		Out.Position = FVector2D(Geometry.LocalToAbsolute(HalfLocalSize));
+		return FString();
+	}
+
+	static FString RefuseResolved(const TSharedRef<FJsonObject>& R, const FString& CodeAndMessage)
+	{
+		FString Code, Message;
+		if (!CodeAndMessage.Split(TEXT("\n"), &Code, &Message)) { Code = CodeAndMessage; }
+		return Refuse(R, Code, Message);
+	}
+
+	// Activation then a mouse move onto Position (hover). Returns whether a widget handled the move.
+	static bool Hover(const FVector2D& Position)
+	{
+		FSlateApplication& Slate = FSlateApplication::Get();
+		Slate.ProcessApplicationActivationEvent(true);
+		const FPointerEvent MoveEvent(
+			Slate.GetUserIndexForMouse(),
+			FSlateApplicationBase::CursorPointerIndex,
+			Position,
+			Position,
+			TSet<FKey>(),
+			EKeys::Invalid,
+			0.0f,
+			Slate.GetModifierKeys());
+		return Slate.ProcessMouseMoveEvent(MoveEvent);
+	}
+
+	static FPointerEvent ButtonEvent(const FVector2D& Position, const FKey& Button, bool bPressed)
+	{
+		FSlateApplication& Slate = FSlateApplication::Get();
+		TSet<FKey> Pressed;
+		if (bPressed)
+		{
+			Pressed.Add(Button);
+		}
+		return FPointerEvent(
+			Slate.GetUserIndexForMouse(),
+			FSlateApplicationBase::CursorPointerIndex,
+			Position,
+			Position,
+			Pressed,
+			Button,
+			0.0f,
+			Slate.GetModifierKeys());
+	}
+}
+
+FString UInputService::InjectClick(const FString& WidgetObjectPath, const FString& Button, bool bDouble)
+{
+	using namespace VibeUEPointerInjection;
+	const TSharedRef<FJsonObject> R = NewResult(WidgetObjectPath, ReadOsCursor());
+	R->SetStringField(TEXT("button"), Button.ToLower());
+
+	FKey MouseButton;
+	if (Button.Equals(TEXT("left"), ESearchCase::IgnoreCase)) { MouseButton = EKeys::LeftMouseButton; }
+	else if (Button.Equals(TEXT("right"), ESearchCase::IgnoreCase)) { MouseButton = EKeys::RightMouseButton; }
+	else if (Button.Equals(TEXT("middle"), ESearchCase::IgnoreCase)) { MouseButton = EKeys::MiddleMouseButton; }
+	else
+	{
+		return Refuse(R, TEXT("BAD_BUTTON"), FString::Printf(TEXT("Unknown button '%s': use 'left', 'right' or 'middle'."), *Button));
+	}
+
+	FPointerTarget Target;
+	const FString ResolveError = ResolveTarget(WidgetObjectPath, Target);
+	if (!ResolveError.IsEmpty())
+	{
+		return RefuseResolved(R, ResolveError);
+	}
+	R->SetArrayField(TEXT("position"), PointJson(Target.Position));
+
+	// Hover first (activation + move), then down/up at the same point. No SetKeyboardFocus: the product's
+	// own click handling decides focus, as a real click would.
+	FSlateApplication& Slate = FSlateApplication::Get();
+	const bool bHandledMove = Hover(Target.Position);
+	const bool bHandledDown = Slate.ProcessMouseButtonDownEvent(Target.NativeWindow, ButtonEvent(Target.Position, MouseButton, true));
+	const bool bHandledUp = Slate.ProcessMouseButtonUpEvent(ButtonEvent(Target.Position, MouseButton, false));
+	R->SetBoolField(TEXT("handled_move"), bHandledMove);
+	R->SetBoolField(TEXT("handled_down"), bHandledDown);
+	R->SetBoolField(TEXT("handled_up"), bHandledUp);
+	if (bDouble)
+	{
+		const bool bHandledDouble = Slate.ProcessMouseButtonDoubleClickEvent(Target.NativeWindow, ButtonEvent(Target.Position, MouseButton, true));
+		Slate.ProcessMouseButtonUpEvent(ButtonEvent(Target.Position, MouseButton, false));
+		R->SetBoolField(TEXT("handled_double"), bHandledDouble);
+	}
+	return Finish(R);
+}
+
+FString UInputService::InjectHover(const FString& WidgetObjectPath)
+{
+	using namespace VibeUEPointerInjection;
+	const TSharedRef<FJsonObject> R = NewResult(WidgetObjectPath, ReadOsCursor());
+	FPointerTarget Target;
+	const FString ResolveError = ResolveTarget(WidgetObjectPath, Target);
+	if (!ResolveError.IsEmpty())
+	{
+		return RefuseResolved(R, ResolveError);
+	}
+	R->SetArrayField(TEXT("position"), PointJson(Target.Position));
+	R->SetBoolField(TEXT("handled_move"), Hover(Target.Position));
+	return Finish(R);
 }
