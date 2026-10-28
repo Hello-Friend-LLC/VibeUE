@@ -83,7 +83,9 @@ premultiply Translucent output; tint/RenderOpacity arrive as VertexColor; widget
 engine function `GetUserInterfaceUV`; UI `Time` never pauses; distinct MIDs never batch; RetainerBox repaints every
 frame by default; MPCs resolve per viewport world) with the mechanism-choice table, validation checklist and
 symptom table: **`ui-material-engine-facts.md`**. Epic UIMaterialLab function/master catalogue:
-**`ui-material-lab-catalogue.md`**.
+**`ui-material-lab-catalogue.md`**. Third-party example repos (RTMSDF, TransitionFX, PDMS, EffectBox, UMG3DTransform)
+measured on the fork, with copy-vs-reauthor verdicts: **`ui-material-examples-catalogue.md`**. Many-instance state
+drive (grids/lists): shared state MICs + UI-Time lerp, `ui-materials.md` section 3.
 
 ### 🚨 Creating Widget Blueprints — only one pattern works
 

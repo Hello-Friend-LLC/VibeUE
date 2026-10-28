@@ -65,6 +65,10 @@ Rules that follow [rule]:
   `MF_UI_AspectRatio` computes (catalogue §2). (A compile-and-capture confirmation of channel 3 values is still
   owed: DOC-0057 OPEN.)
 - `ddx` / `ddy` compile in the UI domain (pixel stage), so derivative-width antialiasing works.
+- DPI [measured-on-fork 2026-10-28 WI-1641]: 1.5x DPI is NOT measured. `WidgetPreviewStateOptions.dpi_scale` produced
+  byte-identical captures at 1.0 and 1.5 for a fixed `desired_size` (no-op, FND-02055), so a DPI check needs PIE or
+  a different `desired_size`. Third-party masters that read only 0..1 UV stretch at non-square sizes
+  (`ui-material-examples-catalogue.md`).
 - The `RoundedBox` brush's local-size shader params are brush-only; a material cannot read them.
 
 Rules [rule]:
@@ -78,6 +82,31 @@ Rules [rule]:
 - A Slate unit is not a device pixel: DPI scale changes the raster footprint of a 2 px stroke. Decide whether
   strokes scale with UI (constant in UV / Slate units) or stay crisp (derive from channel 3 or ddx).
 
+## Fork facts for authoring MD_UI materials  [measured-on-fork 2026-10-28 WI-1641, UE 5.8.3, engine HEAD bc09bb4e]
+
+- Substrate is LIVE (`r.Substrate=1`, 128 bytes per pixel; `DefaultEngine.ini` is right, the `unreal-materials`
+  skill's "False" is stale). An `MD_UI` + Translucent material (Emissive Color -> Final Color, Opacity 0.5)
+  compiled (33 PS instructions) with no warning, and rendered straight-alpha in linear space: red (1,0.1,0.1) at 0.5
+  over blue (0,0,0.4) = sRGB (187,63,137). Python enum is `MD_UI`; `MP_EMISSIVE_COLOR` is the UI Final Color slot,
+  `MP_OPACITY` is Opacity.
+- Authoring route: editor Python `unreal.MaterialEditingLibrary` works (create_material_expression,
+  connect_material_property, recompile_material, MaterialFunction via `MaterialFunctionFactoryNew` +
+  `create_material_expression_in_function` + `connect_material_expressions` + `update_material_function`, MIC via
+  `MaterialInstanceConstantFactoryNew`). Epic `MaterialTools` is registered but :8000 is not started by default and
+  its `connect_to_output` offers only 6 properties: use Python through `ue_driver.py py`.
+- AngelScript bindings (compile verified, not run): `UImage.SetBrushFromMaterial`, `UImage.GetDynamicMaterial()`,
+  `Material::CreateDynamicMaterialInstance(Parent)`, `UMaterialInstanceDynamic.SetScalarParameterValue/
+  SetVectorParameterValue(FLinearColor)`, `UUserWidget.PlayAnimation` with `UPROPERTY(Transient,
+  meta=(BindWidgetAnim))`, `System::SetTimer(this, n"Fn", t, bLoop)`. `UMaterialInstanceDynamic::Create(Parent,
+  Outer)` FAILS ("No matching signatures"): use `Material::CreateDynamicMaterialInstance`. A looping
+  `SetTimer(1/120)` fires 2-5 times per frame (frame-rate bound).
+- Script under `Script/**/Editor/` is editor-only (`FindScriptFiles` skips directories named `Editor`; modules named
+  `Editor.*` get `EditorOnly`; source-read, no packaged run).
+- `/HF_Common/...` assets save into `HF_Plugins/HF_Common/Content` and show in git, not Perforce (`create_asset` +
+  `save_asset` returned True; `git status` shows `?? HF_Common/Content/...`).
+- Scratch WBP for capture probes: `WidgetBlueprintFactory` + `WidgetService.add_component/set_brush` (`draw_as`
+  must be `"Image"`); an Overlay root renders, a CanvasPanel root rendered only a stray patch.
+
 ## 4. MID lifecycle  [verified + rule]
 
 - `UImage::GetDynamicMaterial` / `UBorder::GetDynamicMaterial` create the MID ONCE (outer = the widget), set it as
@@ -85,9 +114,11 @@ Rules [rule]:
   the brush resource is not a material. `SetScalarParameterValue` pushes a render-proxy update only when the value
   changed and triggers NO widget invalidation; Slate re-submits cached elements with the live proxy, so parameter
   and Time changes show without any `Invalidate`/Volatile.
-- HF rule stands [rule]: re-fetch `Image.GetDynamicMaterial()` on every write (`HF_UiMaterial::SetScalar`), never
-  hold the MID in a member: `SetBrushFromMaterial` and a widget-animation material-track restore replace the brush
-  resource, after which a cached pointer writes into an object nobody draws. The re-fetch is a pointer return.
+- HF rule, scoped to ONE OWNER PER BRUSH [rule, measured-on-fork 2026-10-28 WI-1641]: where a widget animation drives the brush, re-fetch
+  `Image.GetDynamicMaterial()` on every write (`HF_UiMaterial::SetScalar`) and never hold the MID:
+  `SetBrushFromMaterial` and a widget-animation material-track restore replace the brush resource, after which a
+  cached pointer writes into an object nobody draws. A brush the script alone owns (the HF_Common state-MIC driver)
+  may cache its own MID or swap MICs. `SetScalar` on a brush that holds a MIC silently creates a MID.
 - Initialization order in the base [rule]: `SetBrushFromMaterial(Preset)` in `PreConstruct` -> apply the complete
   initial state in `Construct` (including values equal to defaults) -> subscribe to events. Construction is
   reentrant (designer, rebuilds): never duplicate subscriptions.
@@ -101,9 +132,12 @@ Rules [rule]:
   fills BOTH from the application clock, never from a `UWorld`: **UI material time never pauses, never dilates,
   and `Ignore Pause` is a no-op**. [verified] A pause menu's shimmer keeps running; a cooldown sweep that must
   freeze on pause needs a script-written progress scalar, not `Time`. [rule]
-- Shader transitions `FromValue/ToValue/StartTime/Duration` need `StartTime` from the same clock the shader reads:
-  `FPlatformTime::Seconds() - GStartTime` (app real time), not world time. Prefer the WBP animation
-  (`ui-materials.md` §3). [rule]
+- Shader transitions `FromValue/ToValue/StartTime/Duration` need `StartTime` from the same clock the shader reads, not
+  world time. On the fork `Gameplay::GetAccurateRealTime` IS that clock (script-reachable, shipping-safe; a 20 s ramp
+  read h .02/.26/.50 at +0.5/5.4/10.2 s) [verified, measured-on-fork 2026-10-28 WI-1641]. Do NOT use world timers for a UI tween (they freeze on
+  pause while `Time` does not), and do not default to the WBP animation for lists: it keeps one MID per touched
+  instance (batching), see the measured drive table in `ui-materials.md` §3. Float32 `Time` gets coarse after days of
+  uptime [reasoned, not measured].
 - Button precedence Disabled > Pressed > Hovered/Focused > Normal, Selected orthogonal; resolve centrally in the
   base so mouse hover, gamepad focus, selection and disable do not fight over one scalar. [rule]
 - Decorative material `Image`s are `HitTestInvisible`; the `UCommonButtonBase` owns input. Material opacity never

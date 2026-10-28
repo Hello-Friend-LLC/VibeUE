@@ -26,7 +26,9 @@ The pack's 40 reusable functions, aspect mechanism and which masters to build on
 - UI `Time` never pauses or dilates (app clock, `Ignore Pause` is a no-op): anything that must freeze on pause is
   a script-written scalar.
 - State lives in ONE scalar per state (`Hovered`, `Is Active`, `Fill amount`) that the master lerps between its
-  style endpoints (`Button Color - default` / `- hovered`). A brush swap per state is the thing to avoid.
+  style endpoints (`Button Color - default` / `- hovered`). A brush swap per state is the thing to avoid for a FEW
+  widgets; for many instances (grids, tile views) the measured rule is shared state MICs plus a transient tween
+  MID (section 3, measured-on-fork 2026-10-28 WI-1641).
 
 ## 2. Master vs instance rule
 
@@ -44,7 +46,36 @@ The pack's 40 reusable functions, aspect mechanism and which masters to build on
 - A port makes NO new masters: duplicate the pack instance with `EditorAssetLibrary.duplicate_asset(src, dst)`
   (keeps parent and overrides) into the port folder under a new name. Never repoint/save the pack.
 
-## 3. State tweens: WBP animation keys the scalar
+## 3. State tweens: WBP animation keys the scalar (few-instance widgets) / state MICs + UI-Time lerp (many)
+
+**Measured drive rule (measured-on-fork 2026-10-28 WI-1641; PIE, 8x8 grid + CommonTileView, 256 recycled items; CPU/GPU cost not
+resolved).** Four drive models were compared: A = WBP animation track, B = cached MID + timer, C = material `Time`
+lerp, D = shared state MICs with a MID only while tweening.
+
+| | A anim track | B cached MID+timer | C material Time | D state MICs |
+|---|---|---|---|---|
+| MIDs per 64 slots | lazy per touched slot, KEPT; rest-settle in Construct makes all 64 | 64 | 64 | 0 idle |
+| Slate batches (baseline 12) | +1 untouched, +64 touched | +64 | +64 | +4 (4 MICs) |
+| Idle work | 0 (+1 ticked while playing) | 0 (a Tick variant: +64 ticks/frame) | 0 | 0 |
+| While paused | animates | freezes | animates | freezes |
+| Recycle with snap-on-bind | clean (StopAllAnimations + settle) | clean | clean | clean |
+
+- The anim track creates a per-instance MID that is kept, so N touched slots = N batches (distinct MIDs never
+  batch; a shared MIC can). The Construct rest-settle below makes MIDs for ALL instances. Animations run while paused.
+  Recycle = `StopAllAnimations` + settle. Scope this section's animation recipe to few-instance widgets.
+- Recommended for lists/grids: **D+C hybrid.** Rest = one shared state MIC per state combination. On a change: a
+  transient MID (MIC parent) gets `<X>From/<X>Amount/<X>Start`; the master lerps on UI Time (zero CPU, keeps running
+  while paused); a one-shot timer at Start+Duration swaps back to the target MIC and drops the MID. `StartTime` comes
+  from `Gameplay::GetAccurateRealTime` (the UI `Time` clock, 20 s ramp measured h .02/.26/.50 at +0.5/5.4/10.2 s;
+  float32 Time gets coarse after days of uptime: reasoned, not measured). No world timers for the tween itself: they
+  freeze on pause. The hybrid was measured as parts (D batching, C clock), not built as one unit.
+- Library: HF_Common `MF_HF_UiStateLerp(From, To, Start, Duration)` (Start default -1e6 so MICs show Amount) and
+  `UHF_UiMaterialStateDriver` (`Setup(UImage, StateMics, Channels, Duration)`, `SetChannel(Name, Target, bAnimate)`,
+  `Snap(model)` from Construct / `OnListItemObjectSet`, `SetReducedMotion`, `Release()` from `OnEntryReleased`).
+- Negative control: skipping the reset on recycle leaks state for A, B and C (stale hover/select on reused entries);
+  D did not reproduce a leak (cause not investigated).
+
+The animation recipe (few-instance widgets, one animation moving more than one scalar):
 
 - The animation holds a `MovieSceneWidgetMaterialTrack` named `Brush.Brush Material`, bound to the brush Image,
   with a scalar channel for the state parameter (2-4 frames). UMG writes the tween into the brush's dynamic
@@ -89,13 +120,18 @@ UFUNCTION(BlueprintOverride) void Construct()
 - Toggle states (equip): `SetIsToggleable(true)` / `OnSelected` plays `Anim_Equip` forward, `OnDeselected` reverse;
   slot exclusivity through a Transient `UCommonButtonGroupBase` on the grid (`AddWidget(slot)` works,
   `SetSelectionRequired`, `OnSelectedButtonBaseChanged`).
-- Animations also key text colour / RenderTransform tracks; keep them as authored. Never create animations through
-  VibeUE `create_animation` (compiler ensure, FND-01257): duplicate a WBP that already has one.
+- Animations also key text colour / RenderTransform tracks; keep them as authored. To author a NEW material-track
+  animation use the section 5 route (`create_animation` + `add_animation_track`, then `copy_tracks`/`paste_tracks`
+  with `BrushPropertyNamePath` injected; measured-on-fork 2026-10-28 WI-1641, scalar params only, played in PIE; FND-01257 was not
+  re-tested), otherwise duplicate a WBP that already has one.
 
 ## 4. Script-driven values
 
-- Write through a helper that re-fetches the MID on EVERY write; never cache it (it goes stale after
-  `SetBrushFromMaterial` or when an animation restore re-points the brush):
+- One owner per brush (measured-on-fork 2026-10-28 WI-1641): a brush whose material an ANIMATION drives is re-fetched on every write and
+  never cached (it goes stale after `SetBrushFromMaterial` or when an animation restore re-points the brush); a
+  brush the SCRIPT owns (state-MIC driver) may cache its own MID or swap MICs, because nothing else re-points it.
+  `HF_UiMaterial::SetScalar` on a brush that currently holds a MIC silently creates a MID (a new batch). Helper for
+  the animation-owned / one-off case:
 
 ```angelscript
 namespace HF_UiMaterial
@@ -148,6 +184,12 @@ print(unreal.MathLibrary.class_is_child_of(unreal.load_class(None, path + "." + 
 # graph leftovers / BP variables
 print(unreal.BlueprintService.list_graphs(path), unreal.BlueprintEditorLibrary.list_member_variable_names(bp))
 ```
+
+- `brush_property_name_path` on a `MovieSceneWidgetMaterialTrack` CANNOT be read or set from Python (FND-02052; the
+  print in the loop above is not reliable, measured-on-fork 2026-10-28 WI-1641); the `create_animation` + `add_animation_track` result has an empty path and
+  does not drive the brush. Working authoring route: create the animation and track with VibeUE, then
+  `LevelSequenceEditorSubsystem.copy_tracks` / `paste_tracks` with `BrushPropertyNamePath(0)="Brush"` injected in the
+  copied text (spike scripts `spike_track_t3d.py` in PrjEfz `Saved/claude_tmp/WI-1641/`; played in PIE, scalar tracks only).
 
 Does not work / use instead:
 
@@ -209,7 +251,8 @@ EAL.save_asset(DST, False)
 | State scalar written by both an animation and script | Animation owns it; script plays the animation |
 | `UButton` hitbox over an `Image` | `UCommonButtonBase` parent (owns hover/press/selected); no UButton |
 | Blueprint variable holding a material ref (`SlotMaterial`) | `UPROPERTY(EditAnywhere) UMaterialInterface` on the AS base + `SetBrushFromMaterial` |
-| Cached `UMaterialInstanceDynamic` member | Re-fetch `Image.GetDynamicMaterial()` per write |
+| Cached `UMaterialInstanceDynamic` member on an animation-driven brush | Re-fetch `Image.GetDynamicMaterial()` per write (a script-owned brush may cache its own MID, section 4) |
+| N per-slot MIDs (or a per-slot animation track) across a grid | Shared state MICs + transient tween MID (section 3) |
 | CommonButtonBase child draws a grey box | Style None draws a default box: assign a `CommonButtonStyle` with NoDrawType (`CBS_MatLab_Transparent`) on the CDO AND on every WBP instance (CDO Style does not reach instances; FND-01277) |
 | Port deleted a Construct pose chain | Rest pose lost: settle the animation at frame 0 in the base `Construct` (section 3) |
 | Segmented bar animating by itself | Pack off state is time-driven: switch `bSetProgressValueManually` on and drive `ProgressValue` |
