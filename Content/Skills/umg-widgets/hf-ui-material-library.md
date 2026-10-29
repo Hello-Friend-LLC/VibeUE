@@ -25,7 +25,7 @@ Contract as built (read from the assets and the builder scripts; matches DEC-568
 | `MF_HF_UiGradient` | `UV`, `ColorA`, `ColorB`, `AngleRad` | `Color` | linear gradient, corners hit exactly A/B; angle 0 = left to right, pi/2 = top to bottom; linear colours |
 | `MF_HF_UiSegmentMask` | `U`, `Fill`, `Segments`, `GapPx` | `Mask` | lit segments = `floor(Fill*N + 1e-4)`, identical to `HF_UiFillRules::QuantizeSegments`; `Segments` 0 = continuous; reads the widget pixel width itself; gaps centred on boundaries, none at the outer ends |
 | `MF_HF_UiLinearRamp` | `UV`, `AngleRad`, `Stop0`, `Stop1` | `T` | smoothstep ramp 0..1 along the angle (pi/2 = top to bottom; T = 0 at the top edge). Returns a scalar, unlike `MF_HF_UiGradient` (colour). Tile piece [WI-1641 measured: capture] |
-| `MF_HF_UiCornerArc` | `PixelPos`, `HalfSizePx`, `RadiusPx`, `ThicknessPx`, `SweepRad`, `InsetPx`, `Corner` (sign pair) | `DistPx` | round-capped ring segment hugging one corner; `Corner` (1,-1) = top-right. Feed into EdgeMask/Stroke like a box SDF. Tile piece |
+| `MF_HF_UiCornerArc` | `PixelPos`, `HalfSizePx`, `RadiusPx`, `ThicknessPx`, `SweepRad`, `InsetPx`, `Corner` (sign pair), `Taper` (0 = even line, 1 = true crescent) | `DistPx` | round-capped ring segment hugging one corner; `Corner` (1,-1) = top-right; `Taper` 1 makes it thickest on the corner diagonal with pointed ends. Feed into EdgeMask/Stroke like a box SDF. Tile piece |
 | `MF_HF_UiEdgeBand` | `PixelPos`, `HalfSizePx`, `HeightPx`, `LinePx`, `EdgeSign` (1 = bottom, -1 = top) | `BandDistPx`, `LineDistPx` | band along the bottom (or top) edge plus a separator line above it. Tile piece |
 | `MF_HF_UiStateLerp` | `From`, `To`, `Start`, `Duration` | `Value` | `lerp(From, To, saturate((Time - Start) / max(Duration, 1e-4)))`, Time = UI clock. `Start` default -1e6 so a MIC shows `To` |
 
@@ -47,17 +47,17 @@ which asked for a VertexColor multiply) [WI-1641 measured: tint applied once].
   opacity to 55 %. Invalid reads by SHAPE too: a diagonal hatch (8 px period) over the fill, so it is not colour only.
 
 **`M_HF_UiTile`** (rarity-tinted inventory tile; a SEPARATE master, not options on the surface, so plain surfaces stay at 130 pixel-shader
-instructions and the tile reads 179 in the editor stats [WI-1641 measured: ps_instr; GPU cost not measured]). Same state scalars, colours, composite order and
+instructions and the tile reads 195 in the editor stats [WI-1641 measured: ps_instr; GPU cost not measured]). Same state scalars, colours, composite order and
 lerp contract as `M_HF_UiSurface`, so `UHF_UiMaterialStateDriver` / `UHF_StateSlotButtonBase` drive it unchanged (no AngelScript change). Tile defaults differ:
 `CornerRadiusPx` 6, `StrokePx` 1, `StateFillMix` 0.2, `HoverMix` 0.15 (surface 0.35 / 0.3 washed the ramp out). Extra parameters (group "Tile"):
 - Rarity: vector `AccentColor` (LINEAR; default 0.10, 0.42, 0.95). One rarity = one accent = one MIC set.
 - Ramp: `GradAngle` 1.75 rad (pi/2 = straight top-down), `GradStop0` 0, `GradStop1` 0.45, `GradStrength` 0.55; accent weight = `GradStrength * (1 - smoothstep(Stop0, Stop1, t))`.
-- Arc (top-right): `CrescentRadiusPx` 9, `CrescentThicknessPx` 1.5, `CrescentSweep` 1.5708 (quarter ring), `CrescentInsetPx` 3, `CrescentStrength` 1 (0 hides it).
+- Arc / crescent (top-right): `CrescentRadiusPx` 13, `CrescentThicknessPx` 3.5 (thickest point), `CrescentSweep` 1.9 rad, `CrescentInsetPx` 4, `CrescentTaper` 1 (0 = even line), `CrescentBright` 0.35 (mix of the accent toward white so it reads on a low-contrast rarity such as Common), `CrescentStrength` 1 (0 hides it). Tuned in the 68 px Variation lab: the earlier 9 / 1.5 / 3 even line peaked only +30 luma over its background, the crescent +90 [WI-1641 measured: capture, diagonal luma profile].
+- Hover cue (group "State"; applied while the Hover amount is up and no drag state is on): the stroke grows by `HoverRimGrowPx` 1, the stroke tends to a rim colour = AccentColor mixed `HoverRimWhite` 0.4 toward white by `HoverRimMix` 0.95 (not applied while Selected, so a selected tile keeps the Selected stroke), the ramp strength gains `HoverGradBoost` 0.45, and the panel lifts `HoverLift` 0.02 toward white (linear space: 0.06 washed the rarity colour to grey). The old tint-only hover (HoverColor 0.15 + a 0.6 stroke mix toward a dark token) measured +4 luma on the body and -3 on the rim [WI-1641 measured].
 - Strip (bottom): `StripHeightPx` 14 (includes the 1 px stroke row), `StripLinePx` 1, `StripDarken` 0.1 (strip = AccentColor * StripDarken), `StripLineMix` 0.5 (separator).
 State tints are applied to the panel UNDER the rarity art, so rarity stays readable while Selected/Eligible; the Invalid hatch, hover overlay and stroke stay on top.
-Measured on the fork (capture + pixel probe, Rare 80x80): 7 panel rows, a 1 px separator, 13 strip rows, stroke row; the arc peaks about 8 px down and 4 px in from
-the top-right. Known limit: the arc is 1.5 px thick (physical px, not DPI scaled) and subtle at a 68 px tile; raise `CrescentThicknessPx` or `CrescentStrength`
-if a design needs it prominent [WI-1641 measured gap]. The category icon is NOT drawn by the material: see the rest-MIC rule in section 3.
+Measured on the fork (capture + pixel probe, Rare 80x80): 7 panel rows, a 1 px separator, 13 strip rows, stroke row. The arc and rim are physical px (not DPI scaled, FND-02061), so a
+smaller UI scale makes them proportionally larger; raise `CrescentRadiusPx` / `CrescentThicknessPx` for a larger tile. The category icon is NOT drawn by the material: see the rest-MIC rule in section 3.
 
 **`M_HF_UiMeter`** (track + fill along width): `FillAmount` 1, `SegmentCount` 0 (0 = continuous), `SegmentGapPx` 2, `CornerRadiusPx` 4, `TrackColor`, `FillColor`.
 
@@ -201,8 +201,8 @@ radius 4, stroke 1, strip 16 px (master default 14; room for a 12 px glyph + 10 
 bottom-left and count bottom-right of the strip as separate widgets, lab-local rarity hues (Common 7D8B97, Uncommon C2A878, Rare 2FB5A8, Epic 8E7CE8, Legendary E9A23A;
 PrjEfz has no rarity UI colour source: `UArcItemRarity` has none and `EfzInventoryStyle` has no rarity tokens). Measured [WI-1641 measured, capture only]: strip 15 rows + 1
 stroke row and a 1 px stroke at DPI 1.0 / 0.666 / 0.7606 (arc, stroke and strip are device px, not DPI scaled); Invalid is separable in greyscale (hatch stddev 20.8 vs 0.0 for
-every other state, min mean gap 17.5). Visual check of `lab_var_1920x1080`: count-only slots, rarity ramp, strip and Invalid hatch clear; the arc is hard to see at 68 px and Hover
-vs Idle is a small brightening, so read hover by the hover line as well. Not measured: tile tween in PIE, real hover/click, DPI 1.5/4K, GPU cost of 124 tiles.
+every other state, min mean gap 17.5). Visual check of `lab_var_1920x1080`: count-only slots, rarity ramp, strip and Invalid hatch clear; after the tuning pass the crescent reads at 68 px at 1920x1080 and at the 1280x720 capture (DPI 0.666) on every rarity including Common (diagonal luma 189 against a ~100 ramp, vs 130 before)
+and Hover is a clear step from Idle (rim luma 62 -> 191-207 and body 33 -> 56 on the Efz tokens, vs -3 / +4 before); Hover stays separable from Selected (88), Eligible (66) and Drag source (45) by body luma and by its bright rim, and Invalid keeps its hatch (stddev 20.8 vs 0.0). Not measured: tile tween in PIE, real hover/click, DPI 1.5/4K, GPU cost of 124 tiles.
 
 ## Pending p4-pie (not measured)
 
