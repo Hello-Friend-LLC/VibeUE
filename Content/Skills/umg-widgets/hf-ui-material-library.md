@@ -124,7 +124,7 @@ Driver.Release();                                    // clear timer, drop MID, s
   master lerps; a one-shot `System::SetTimer` (duration + 0.02 s) swaps back to the MIC. No Tick, no looping timer, no world-timer tween.
 - Retarget mid-tween starts from the in-flight value (`HF_UiStateRules::LerpAt`), so nothing jumps.
 - Measured [WI-1641 measured, editor preview world, not PIE]: with `Log HF_Ui Verbose`, a forced tween logs `tween start IdleHover hover 0.0->1.0 ...` and
-  `tween finish IdleHover` 72 ms later; idle 4 s after: 0 `HF_Ui` lines. A resting slot's `Background.Brush.ResourceObject` class is `MaterialInstanceConstant`
+  `tween finish IdleHover` 72 ms later (editor preview; the real length is `TransitionDuration + 0.02` = 140 ms for 0.12, see the PIE numbers in s8); idle 4 s after: 0 `HF_Ui` lines. A resting slot's `Background.Brush.ResourceObject` class is `MaterialInstanceConstant`
   (31 of 31 readbacks), never `MaterialInstanceDynamic`. Pool of 64 cells after `Release()+Snap()`: "MID brushes 0".
 - **Pending p4-pie**: the real hover tween with a real pointer, the swap-back timer in a PIE world (world resolves through the widget Outer: source-read only),
   pause behaviour, drag states via `SetDragState`, the hybrid as one measured unit, GPU cost, real DPI.
@@ -146,8 +146,7 @@ set `[Core.Log] HF_Ui=Verbose` or `-LogCmds="HF_Ui Verbose"`, or register the ca
   inherit `UHF_StateSlotButtonBase`: call `Snap(flags)` from the forwarded bind and `ReleaseEntry()` from the release.
 - Slot that CANNOT inherit the HF base (existing project class): COMPOSE the driver. Keep `UPROPERTY(Transient) UHF_UiMaterialStateDriver Driver` on your class,
   `NewObject(this, ...)` + `Setup(Background, StateMics, duration)` in `OnInitialized`; call `Driver.Snap(...)` at the end of your bind function and
-  `Driver.Release()` in your clear function. PrjEfz hook points (not yet wired in shipping code; WI-1635 owns those widgets): `Script/UI/EfzInventoryWidgets.as`
-  `SetItemStack` (BP `OnListItemObjectSet` forwards to it) and `ClearSlot` (BP `OnEntryReleased` forwards to it) [source read, not run].
+  `Driver.Release()` in your clear function. PrjEfz wired recipe (WI-1643, `Script/UI/EfzInventoryWidgets.as` `UEfzInventorySlotWidgetBase`): the frame is the existing `SelectedOutlineImage`; `bUseMaterialStateFrame` (AS default false, slot WBP CDO true) plus a CDO `TMap<FName, UMaterialInterface> FrameMics` (7 hard refs so the MICs cook) and `FrameTransitionDuration`; `FrameDriver` is `UPROPERTY(Transient)`. `SyncFrame(bAnimate)` is the ONLY writer of that image's brush and visibility while the flag is on: flags = hover (`bHoverFillActive`), selected (`bSelectedVisual || bNavFocused`); neither set = Snap and Collapse (snap out, no cost at rest), else HitTestInvisible first, then `SetFlags(flags, true)`; `bAnimate = false` calls `Snap`. Feeds: end of `ApplyCellFill` (hover) and `ApplySelectedOutline` (selected). `SetItemStack` ends with `SyncFrame(false)` (current flags, never Idle: it runs on every refresh); `ClearSlot` and `Destruct` call `Release()` LAST, then Collapse. Traps [WI-1643 measured]: (1) set `Brush.DrawAs = Image` (the WBP brush is a RoundedBox outline); (2) the WBP brush `TintColor` had alpha 0 and Slate multiplies the material by it: set it and `ColorAndOpacity` to white, else the frame is invisible; (3) the BP Event OnInitialized did not reach the AS `OnInitialized` for `capture_preview_state` instances, so build the driver lazily on first use (`InitFrame`) as well; (4) a capture renders on a frozen material clock, so a tween shows its first frame: the capture hook calls `SyncFrame(false)` (Snap); (5) Python `set_selected_visual` was a silent no-op on a live instance: use `call_method("SetSelectedVisual", (True,))`.
 
 ## 7. When to use a plain brush instead
 
@@ -155,14 +154,16 @@ set `[Core.Log] HF_Ui=Verbose` or `-LogCmds="HF_Ui Verbose"`, or register the ca
 - Anything that needs a texture-backed look the SDF cannot give (artwork, 9-slice textures), or a retained/blurred effect (use RetainerBox, `ui-material-engine-facts.md` §6).
 - Gradients and rounded rectangles that never change at runtime and appear once or twice.
 - Rule of thumb (WI-1641): use the material when it earns its cost by (a) crisp aspect-correct rounded corners/strokes at any size and DPI, (b) a state tween
-  across many instances on shared MICs, or (c) a meter with exact segment quantization. Otherwise brush. The material-vs-brush GPU cost is **pending p4-pie**.
+  across many instances on shared MICs, or (c) a meter with exact segment quantization. Otherwise brush. The material-vs-brush GPU cost is **pending p4-pie** (CPU Slate cost of the frame measured in s8).
 
 ## 8. Cost rules
 
 - Distinct MIDs never batch in Slate; a shared MIC can [WI-1641 measured, P0 spike: 64 slots, baseline 12 batches; state MICs +4 for 4 MICs, per-slot MIDs +64].
 - Rest every instance on a shared MIC; own a MID only while tweening. Do not set per-slot scalars; use the 7 MICs plus `Image.ColorAndOpacity` for static tints.
 - A style tweak (stroke, radius, intensity) for a whole list: hand EVERY cell the SAME shared set of MIDs (the PrjEfz lab does this), never one per slot.
-- Idle cost is 0 per frame (no Tick, no timer at rest) [WI-1641 measured]. CPU Slate numbers in the editor were noise; GPU not measured: **pending p4-pie**.
+- Idle cost is 0 per frame (no Tick, no timer at rest) [WI-1641 measured]. CPU Slate numbers in the editor were noise; GPU not measured.
+- PrjEfz inventory pilot, PIE, 8x9 player grid, frame ON vs OFF [WI-1643 measured: p2-pie, PIE window, Insights `stat slate`]: 0 slot MIDs at rest (132 entries, frame_shown 0, frame_mids 0); process MIDs after GC 327 ON vs 328 OFF (transient-outer 74 both); Slate batches idle 75 / 1176 vertices ON and OFF, steady hover (with tooltip) ON 86 / 1752 vs OFF 85 / 1748 = +1 batch, +4 vertices while a cell is hovered.
+- Tween timing in PIE [WI-1643 measured]: by design `FrameTransitionDuration + 0.02` = 140 ms (0.12 s tween); measured finish 127 / 144 ms on real hover and 85 ms on a programmatic select, so the swap-back can fire up to about one frame early (cause unresolved, finding filed); the earlier "72 ms" was an editor-preview figure, not the real length. The game is not paused with the inventory open, so the swap-back timer runs.
 
 ## 9. Decorate a slot in a new project (step by step)
 
@@ -213,5 +214,5 @@ Third review (p5c, Scott: icon too high, counts without "x"; all PIE-free captur
 
 ## Pending p4-pie (not measured)
 
-GPU cost (material vs brush), real DPI (1.5x; `capture_preview_state dpi_scale` is a no-op, FND-02055), the hybrid driver as one unit in a pooled tile view,
-real hover/click/drag, the tile master (`M_HF_UiTile`) tween on a driven slot and its GPU cost vs the surface, 124-tile Variation grid cost, pause behaviour, the swap-back timer in a PIE world, float32 Time coarseness after long uptime (reasoned only).
+GPU cost (material vs brush), real DPI (1.5x; `capture_preview_state dpi_scale` is a no-op, FND-02055), the hybrid driver as one unit in a pooled tile view (PrjEfz slot measured: recycle leaves no frame, 0 MIDs at rest),
+real click (hover, drag and recycle measured in WI-1643; nav focus frame not observed in live PIE, FND-02010; socket/tray selection, `DragVerdictOutlineImage` and a real item move not exercised), the tile master (`M_HF_UiTile`) tween on a driven slot and its GPU cost vs the surface, 124-tile Variation grid cost,  float32 Time coarseness after long uptime (reasoned only).
