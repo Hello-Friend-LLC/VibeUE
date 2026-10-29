@@ -1,6 +1,6 @@
 ---
 name: umg-widgets/hf-ui-material-library
-description: How to use the HF_Common UI-material library (WI-1641, DEC-5685) in any HF project — the MF_HF_Ui* material functions and M_HF_UiSurface / M_HF_UiMeter masters with every parameter, the 7-MIC rest set and the python table that generates a style set, the three one-owner-per-brush modes and which HF_Common base uses which (UHF_StateSlotButtonBase + UHF_UiMaterialStateDriver, UHF_MaterialFillBase, anim-owned UHF_SlotButtonBase), driver lifecycle (OnInitialized, Snap on bind, Release on entry release, reduced motion), the list-entry recipe when a slot cannot inherit the base, when to use a plain brush instead, cost rules, a step-by-step decorate-a-slot recipe pointing at WBP_HFUIMaterialExample, and the PrjEfz UIMaterialLab as the worked inventory example.
+description: How to use the HF_Common UI-material library (WI-1641, DEC-5685) in any HF project — the MF_HF_Ui* material functions and M_HF_UiSurface / M_HF_UiMeter / M_HF_UiTile masters (tile = rarity ramp, corner arc, bottom strip) with every parameter, the 7-MIC rest set and the python table that generates a style set, the three one-owner-per-brush modes and which HF_Common base uses which (UHF_StateSlotButtonBase + UHF_UiMaterialStateDriver, UHF_MaterialFillBase, anim-owned UHF_SlotButtonBase), driver lifecycle (OnInitialized, Snap on bind, Release on entry release, reduced motion), the list-entry recipe when a slot cannot inherit the base, when to use a plain brush instead, cost rules, a step-by-step decorate-a-slot recipe pointing at WBP_HFUIMaterialExample, and the PrjEfz UIMaterialLab as the worked inventory example.
 ---
 
 # HF_Common UI-material library: how to use it
@@ -24,6 +24,9 @@ Contract as built (read from the assets and the builder scripts; matches DEC-568
 | `MF_HF_UiStroke` | `SDF`, `PixelRange`, `Offset`, `Width` | `StrokeMask` | copy of RTMSDF `Stroke_Absolute`; the band is CENTRED on SDF = 0, so for an inner stroke of width w feed `SDF + w/2` (this is what M_HF_UiSurface does) |
 | `MF_HF_UiGradient` | `UV`, `ColorA`, `ColorB`, `AngleRad` | `Color` | linear gradient, corners hit exactly A/B; angle 0 = left to right, pi/2 = top to bottom; linear colours |
 | `MF_HF_UiSegmentMask` | `U`, `Fill`, `Segments`, `GapPx` | `Mask` | lit segments = `floor(Fill*N + 1e-4)`, identical to `HF_UiFillRules::QuantizeSegments`; `Segments` 0 = continuous; reads the widget pixel width itself; gaps centred on boundaries, none at the outer ends |
+| `MF_HF_UiLinearRamp` | `UV`, `AngleRad`, `Stop0`, `Stop1` | `T` | smoothstep ramp 0..1 along the angle (pi/2 = top to bottom; T = 0 at the top edge). Returns a scalar, unlike `MF_HF_UiGradient` (colour). Tile piece [WI-1641 measured: capture] |
+| `MF_HF_UiCornerArc` | `PixelPos`, `HalfSizePx`, `RadiusPx`, `ThicknessPx`, `SweepRad`, `InsetPx`, `Corner` (sign pair) | `DistPx` | round-capped ring segment hugging one corner; `Corner` (1,-1) = top-right. Feed into EdgeMask/Stroke like a box SDF. Tile piece |
+| `MF_HF_UiEdgeBand` | `PixelPos`, `HalfSizePx`, `HeightPx`, `LinePx`, `EdgeSign` (1 = bottom, -1 = top) | `BandDistPx`, `LineDistPx` | band along the bottom (or top) edge plus a separator line above it. Tile piece |
 | `MF_HF_UiStateLerp` | `From`, `To`, `Start`, `Duration` | `Value` | `lerp(From, To, saturate((Time - Start) / max(Duration, 1e-4)))`, Time = UI clock. `Start` default -1e6 so a MIC shows `To` |
 
 RTMSDF copies are MIT (Richard Meredith AB 2022-2025): notice in each asset Description and in `Content/Materials/Functions/UI/NOTICES.md`
@@ -42,6 +45,19 @@ which asked for a VertexColor multiply) [WI-1641 measured: tint applied once].
 - Colours (LINEAR; alpha = opacity of the fill/stroke): `FillColor`, `StrokeColor`, `HoverColor`, `SelectedColor`, `DragSourceColor`, `EligibleColor`, `InvalidColor`.
 - Composite order: base -> Selected -> DragSource -> Eligible -> Invalid by Amount, Hover overlay on top, suppressed while a drag state is on. DragSource also dims
   opacity to 55 %. Invalid reads by SHAPE too: a diagonal hatch (8 px period) over the fill, so it is not colour only.
+
+**`M_HF_UiTile`** (rarity-tinted inventory tile; a SEPARATE master, not options on the surface, so plain surfaces stay at 130 pixel-shader
+instructions and the tile reads 179 in the editor stats [WI-1641 measured: ps_instr; GPU cost not measured]). Same state scalars, colours, composite order and
+lerp contract as `M_HF_UiSurface`, so `UHF_UiMaterialStateDriver` / `UHF_StateSlotButtonBase` drive it unchanged (no AngelScript change). Tile defaults differ:
+`CornerRadiusPx` 6, `StrokePx` 1, `StateFillMix` 0.2, `HoverMix` 0.15 (surface 0.35 / 0.3 washed the ramp out). Extra parameters (group "Tile"):
+- Rarity: vector `AccentColor` (LINEAR; default 0.10, 0.42, 0.95). One rarity = one accent = one MIC set.
+- Ramp: `GradAngle` 1.75 rad (pi/2 = straight top-down), `GradStop0` 0, `GradStop1` 0.45, `GradStrength` 0.55; accent weight = `GradStrength * (1 - smoothstep(Stop0, Stop1, t))`.
+- Arc (top-right): `CrescentRadiusPx` 9, `CrescentThicknessPx` 1.5, `CrescentSweep` 1.5708 (quarter ring), `CrescentInsetPx` 3, `CrescentStrength` 1 (0 hides it).
+- Strip (bottom): `StripHeightPx` 14 (includes the 1 px stroke row), `StripLinePx` 1, `StripDarken` 0.1 (strip = AccentColor * StripDarken), `StripLineMix` 0.5 (separator).
+State tints are applied to the panel UNDER the rarity art, so rarity stays readable while Selected/Eligible; the Invalid hatch, hover overlay and stroke stay on top.
+Measured on the fork (capture + pixel probe, Rare 80x80): 7 panel rows, a 1 px separator, 13 strip rows, stroke row; the arc peaks about 8 px down and 4 px in from
+the top-right. Known limit: the arc is 1.5 px thick (physical px, not DPI scaled) and subtle at a 68 px tile; raise `CrescentThicknessPx` or `CrescentStrength`
+if a design needs it prominent [WI-1641 measured gap]. The category icon is NOT drawn by the material: see the rest-MIC rule in section 3.
 
 **`M_HF_UiMeter`** (track + fill along width): `FillAmount` 1, `SegmentCount` 0 (0 = continuous), `SegmentGapPx` 2, `CornerRadiusPx` 4, `TrackColor`, `FillColor`.
 
@@ -64,6 +80,12 @@ paths = hf_ui_styles.make_surface_mics("/Game/UI/Materials/MyStyle", "MI_My",
 meters = hf_ui_styles.make_meter_mics("/Game/UI/Materials/MyStyle", "MI_MyMeter", vectors={"FillColor": (...)})
 ```
 
+- Rarity tiles: `hf_ui_tile.make_tile_mics(dest, prefix, accent=<linear>, vectors={...})` (HF_Common `Content/Python/hf_ui_tile.py`) wraps `make_surface_mics`
+  with `M_HF_UiTile` as parent and sets `AccentColor`; call it once per rarity (7 MICs each; neutral set `MI_HF_UiTile_*`). The PrjEfz worked script is
+  `Content/Python/efz_ui_variation_mics.py` (35 MICs `MI_EfzUI_VarTile_<Rarity>_<State>`, StripHeightPx 16).
+- Rest-MIC rule for per-item data: a rest MIC carries only rarity and state. The category icon, the item art and the count are SEPARATE Images/Text over the
+  tile (icon over the strip, art in `ItemIcon`); never push per-slot data into a shared MIC or give the slot its own MID (a driver brush gets no per-instance data).
+  An empty cell uses the Common set plus a dim `ColorAndOpacity` tint, never a different material.
 - Colours are LINEAR: convert sRGB tokens first (PrjEfz: `EfzInventoryStyle::FromSRGB`; the PrjEfz worked script is `Content/Python/efz_ui_style_mics.py`).
   Hex written as linear renders wrong [WI-1641 measured: PrjEfz idle fill matched its token within 0 levels after conversion].
 - `make_neutral()` makes the HF grey/blue set `MI_HF_UiSurface_*`, `MI_HF_UiMeter_Linear`, `MI_HF_UiMeter_Segmented`.
@@ -172,7 +194,17 @@ Lab traps worth copying: changing a BindWidget UPROPERTY type then recompiling t
 colour to transparent (always pass a colour); Overlay children default to Left/Top (set Fill/Fill). The lab is the worked inventory example; production adoption
 is a one-slot pilot owned by a separate item.
 
+Variation tab (p5): `UEfzUiMatLabVariationStation` (`EfzUiMatLabVariation.as`, `WBP_EfzUiMatLab_VariationStation`) with slot `UEfzUiMatLabVariationSlot`
+(`UHF_StateSlotButtonBase`, `WBP_EfzUiMatLab_VariationSlot`) shows 5 rarities x 5 categories, the six forced states per tier, an 8x8 mixed grid, a text-heavy vs tile
+comparison row and a hover line (name | rarity | category | count; the tile itself carries only the count). Palette/geometry as built (DEC-5695): tile 68x68, corner
+radius 4, stroke 1, strip 16 px (master default 14; room for a 12 px glyph + 10 pt count), arc top-right at master defaults, one rest-MIC set per rarity, category glyph
+bottom-left and count bottom-right of the strip as separate widgets, lab-local rarity hues (Common 7D8B97, Uncommon C2A878, Rare 2FB5A8, Epic 8E7CE8, Legendary E9A23A;
+PrjEfz has no rarity UI colour source: `UArcItemRarity` has none and `EfzInventoryStyle` has no rarity tokens). Measured [WI-1641 measured, capture only]: strip 15 rows + 1
+stroke row and a 1 px stroke at DPI 1.0 / 0.666 / 0.7606 (arc, stroke and strip are device px, not DPI scaled); Invalid is separable in greyscale (hatch stddev 20.8 vs 0.0 for
+every other state, min mean gap 17.5). Visual check of `lab_var_1920x1080`: count-only slots, rarity ramp, strip and Invalid hatch clear; the arc is hard to see at 68 px and Hover
+vs Idle is a small brightening, so read hover by the hover line as well. Not measured: tile tween in PIE, real hover/click, DPI 1.5/4K, GPU cost of 124 tiles.
+
 ## Pending p4-pie (not measured)
 
 GPU cost (material vs brush), real DPI (1.5x; `capture_preview_state dpi_scale` is a no-op, FND-02055), the hybrid driver as one unit in a pooled tile view,
-real hover/click/drag, pause behaviour, the swap-back timer in a PIE world, float32 Time coarseness after long uptime (reasoned only).
+real hover/click/drag, the tile master (`M_HF_UiTile`) tween on a driven slot and its GPU cost vs the surface, 124-tile Variation grid cost, pause behaviour, the swap-back timer in a PIE world, float32 Time coarseness after long uptime (reasoned only).
