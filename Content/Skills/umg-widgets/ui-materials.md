@@ -70,8 +70,10 @@ lerp, D = shared state MICs with a MID only while tweening.
   float32 Time gets coarse after days of uptime: reasoned, not measured). No world timers for the tween itself: they
   freeze on pause. The hybrid was measured as parts (D batching, C clock), not built as one unit.
 - Library: HF_Common `MF_HF_UiStateLerp(From, To, Start, Duration)` (Start default -1e6 so MICs show Amount) and
-  `UHF_UiMaterialStateDriver` (`Setup(UImage, StateMics, Channels, Duration)`, `SetChannel(Name, Target, bAnimate)`,
-  `Snap(model)` from Construct / `OnListItemObjectSet`, `SetReducedMotion`, `Release()` from `OnEntryReleased`).
+  `UHF_UiMaterialStateDriver` (`Setup(UImage, TMap<FName,UMaterialInterface> StateMics, Duration)`,
+  `SetFlags(FHF_UiStateFlags, bAnimate)`, `Snap(Flags)` from Construct / `OnListItemObjectSet`, `SetReducedMotion`,
+  `Release()` from `OnEntryReleased`; callers pass flags, never channel names). Full API, the 7-MIC set, the three
+  ownership modes and the new-project recipe: **`hf-ui-material-library.md`**.
 - Negative control: skipping the reset on recycle leaks state for A, B and C (stale hover/select on reused entries);
   D did not reproduce a leak (cause not investigated).
 
@@ -257,3 +259,5 @@ EAL.save_asset(DST, False)
 | Port deleted a Construct pose chain | Rest pose lost: settle the animation at frame 0 in the base `Construct` (section 3) |
 | Segmented bar animating by itself | Pack off state is time-driven: switch `bSetProgressValueManually` on and drive `ProgressValue` |
 | Copy page still references pack child classes | `replace_widget_class` per child instance (section 6) |
+
+How to USE the HF_Common library that implements these patterns (MF_HF_Ui* functions, M_HF_Ui* masters, 7-MIC style set, state driver, new-project recipe): `hf-ui-material-library.md`.

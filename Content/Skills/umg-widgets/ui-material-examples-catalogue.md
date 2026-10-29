@@ -115,3 +115,5 @@ mechanisms come from the prior WI-1548 measurement). G3 upstream-only: UMG3DTran
 PostProcess path, RTMSDF WidgetScaler outside layout, EffectBox invalidation claim. G4 TransitionFX aspect in a slot
 smaller than the viewport. G5 EffectBox failure cause. G6 21 of 56 UI masters load-only. GPU cost of any master not
 measured.
+
+Using the HF_Common material library in a project (functions, masters, driver, recipe): `hf-ui-material-library.md`. The HF_Common functions here are the reauthored/copied result of this survey (RTMSDF edge/stroke copies, notice in HF_Common NOTICES.md).

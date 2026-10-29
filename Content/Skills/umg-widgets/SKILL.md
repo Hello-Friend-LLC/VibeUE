@@ -85,7 +85,8 @@ frame by default; MPCs resolve per viewport world) with the mechanism-choice tab
 symptom table: **`ui-material-engine-facts.md`**. Epic UIMaterialLab function/master catalogue:
 **`ui-material-lab-catalogue.md`**. Third-party example repos (RTMSDF, TransitionFX, PDMS, EffectBox, UMG3DTransform)
 measured on the fork, with copy-vs-reauthor verdicts: **`ui-material-examples-catalogue.md`**. Many-instance state
-drive (grids/lists): shared state MICs + UI-Time lerp, `ui-materials.md` section 3.
+drive (grids/lists): shared state MICs + UI-Time lerp, `ui-materials.md` section 3. Using the HF_Common material
+library (MF_HF_Ui* functions, M_HF_Ui* masters, state driver, new-project recipe, PrjEfz lab): **`hf-ui-material-library.md`**.
 
 ### 🚨 Creating Widget Blueprints — only one pattern works
 
@@ -333,6 +334,9 @@ loader that exposes this skill; there is no `vibeue-skills-manager` tool):
 - **`ui-patterns-reference.md`** — project-neutral reference AS code for the UI-material patterns (material-write
   helper, pure rules + unit test, animated button base with rest-pose settle, slot, fill, grid with
   `UCommonButtonGroupBase`); copy and rename the prefix, no Epic pack required.
+- **`hf-ui-material-library.md`** — how to use the HF_Common UI-material library: function pins, masters and parameters,
+  the 7-MIC style set and generator, three ownership modes, driver lifecycle, list-entry recipe, brush-vs-material, cost,
+  decorate-a-slot recipe, PrjEfz lab as worked example.
 - **`ui-materials.md`** — UI-domain material patterns: when a material beats a brush, master vs instance rule,
   WBP animations keying one state scalar (`BindWidgetAnim` members, one writer, rest pose), script-driven fill
   values, Python inspection recipes (animations, material params), the copy/remap route for porting a WBP
