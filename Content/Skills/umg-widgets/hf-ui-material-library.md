@@ -47,17 +47,18 @@ which asked for a VertexColor multiply) [WI-1641 measured: tint applied once].
   opacity to 55 %. Invalid reads by SHAPE too: a diagonal hatch (8 px period) over the fill, so it is not colour only.
 
 **`M_HF_UiTile`** (rarity-tinted inventory tile; a SEPARATE master, not options on the surface, so plain surfaces stay at 130 pixel-shader
-instructions and the tile reads 195 in the editor stats [WI-1641 measured: ps_instr; GPU cost not measured]). Same state scalars, colours, composite order and
+instructions and the tile reads 201 in the editor stats [WI-1641 measured: ps_instr; GPU cost not measured]). Same state scalars, colours, composite order and
 lerp contract as `M_HF_UiSurface`, so `UHF_UiMaterialStateDriver` / `UHF_StateSlotButtonBase` drive it unchanged (no AngelScript change). Tile defaults differ:
 `CornerRadiusPx` 6, `StrokePx` 1, `StateFillMix` 0.2, `HoverMix` 0.15 (surface 0.35 / 0.3 washed the ramp out). Extra parameters (group "Tile"):
 - Rarity: vector `AccentColor` (LINEAR; default 0.10, 0.42, 0.95). One rarity = one accent = one MIC set.
 - Ramp: `GradAngle` 1.75 rad (pi/2 = straight top-down), `GradStop0` 0, `GradStop1` 0.45, `GradStrength` 0.55; accent weight = `GradStrength * (1 - smoothstep(Stop0, Stop1, t))`.
-- Arc / crescent (top-right): `CrescentRadiusPx` 13, `CrescentThicknessPx` 3.5 (thickest point), `CrescentSweep` 1.9 rad, `CrescentInsetPx` 4, `CrescentTaper` 1 (0 = even line), `CrescentBright` 0.35 (mix of the accent toward white so it reads on a low-contrast rarity such as Common), `CrescentStrength` 1 (0 hides it). Tuned in the 68 px Variation lab: the earlier 9 / 1.5 / 3 even line peaked only +30 luma over its background, the crescent +90 [WI-1641 measured: capture, diagonal luma profile].
+- Arc / crescent (top-right): `CrescentRadiusPx` 13, `CrescentThicknessPx` 3.5 (thickest point), `CrescentSweep` 1.9 rad, `CrescentInsetPx` 4, `CrescentTaper` 1 (0 = even line), `CrescentBright` 0.35 (mix of the accent toward white so it reads on a low-contrast rarity such as Common), `CrescentStrength` 1 (0 hides it; an empty slot's MIC set uses 0). Tuned in the 68 px Variation lab: the earlier 9 / 1.5 / 3 even line peaked only +30 luma over its background, the crescent +90 [WI-1641 measured: capture, diagonal luma profile].
 - Hover cue (group "State"; applied while the Hover amount is up and no drag state is on): the stroke grows by `HoverRimGrowPx` 1, the stroke tends to a rim colour = AccentColor mixed `HoverRimWhite` 0.4 toward white by `HoverRimMix` 0.95 (not applied while Selected, so a selected tile keeps the Selected stroke), the ramp strength gains `HoverGradBoost` 0.45, and the panel lifts `HoverLift` 0.02 toward white (linear space: 0.06 washed the rarity colour to grey). The old tint-only hover (HoverColor 0.15 + a 0.6 stroke mix toward a dark token) measured +4 luma on the body and -3 on the rim [WI-1641 measured].
-- Strip (bottom): `StripHeightPx` 14 (includes the 1 px stroke row), `StripLinePx` 1, `StripDarken` 0.1 (strip = AccentColor * StripDarken), `StripLineMix` 0.5 (separator).
+- Strip (bottom): `StripHeightPx` 14 (includes the 1 px stroke row), `StripLinePx` 1, `StripDarken` 0.1 (strip = AccentColor * StripDarken), `StripLineMix` 0.5 (separator); `StripHeightPx` 0 plus `StripLinePx` 0 removes the strip (empty slot).
+- Size scaling (group "Tile"): `SizeRefPx` 0 (default = the strip and crescent numbers above are absolute DEVICE px, the original behaviour). With `SizeRefPx` > 0 (the widget height in px the numbers were authored for) `StripHeightPx`, `CrescentRadiusPx`, `CrescentThicknessPx` and `CrescentInsetPx` are multiplied by (real widget height / `SizeRefPx`), so the strip and arc keep their proportion at any DPI scale or widget size; stroke, separator line and the Invalid hatch stay absolute px. The MIC authoring rule: set the numbers for the 1x size and `SizeRefPx` to that size [WI-1641 measured: strip 26 / 17 / 19 px at 112 / 75 / 85 px tiles, DPI 1.0 / 0.666 / 0.7606].
 State tints are applied to the panel UNDER the rarity art, so rarity stays readable while Selected/Eligible; the Invalid hatch, hover overlay and stroke stay on top.
 Measured on the fork (capture + pixel probe, Rare 80x80): 7 panel rows, a 1 px separator, 13 strip rows, stroke row. The arc and rim are physical px (not DPI scaled, FND-02061), so a
-smaller UI scale makes them proportionally larger; raise `CrescentRadiusPx` / `CrescentThicknessPx` for a larger tile. The category icon is NOT drawn by the material: see the rest-MIC rule in section 3.
+smaller UI scale makes them proportionally larger; raise `CrescentRadiusPx` / `CrescentThicknessPx` for a larger tile. Without `SizeRefPx` the arc and strip are physical px (not DPI scaled, FND-02061): at a smaller UI scale they grow in proportion to the tile and at DPI 1.5 a strip authored for 1x ends up short of its text; set `SizeRefPx` to fix that. The category icon is NOT drawn by the material: see the rest-MIC rule in section 3.
 
 **`M_HF_UiMeter`** (track + fill along width): `FillAmount` 1, `SegmentCount` 0 (0 = continuous), `SegmentGapPx` 2, `CornerRadiusPx` 4, `TrackColor`, `FillColor`.
 
@@ -82,10 +83,10 @@ meters = hf_ui_styles.make_meter_mics("/Game/UI/Materials/MyStyle", "MI_MyMeter"
 
 - Rarity tiles: `hf_ui_tile.make_tile_mics(dest, prefix, accent=<linear>, vectors={...})` (HF_Common `Content/Python/hf_ui_tile.py`) wraps `make_surface_mics`
   with `M_HF_UiTile` as parent and sets `AccentColor`; call it once per rarity (7 MICs each; neutral set `MI_HF_UiTile_*`). The PrjEfz worked script is
-  `Content/Python/efz_ui_variation_mics.py` (35 MICs `MI_EfzUI_VarTile_<Rarity>_<State>`, StripHeightPx 16).
+  `Content/Python/efz_ui_variation_mics.py` (42 MICs `MI_EfzUI_VarTile_<Rarity|Empty>_<State>`: 112 px cell, StripHeightPx 26, CrescentRadiusPx 21.5 / 5.75 thick / inset 6.5, `SizeRefPx` 112; the in-place upsert never deletes a referenced MIC).
 - Rest-MIC rule for per-item data: a rest MIC carries only rarity and state. The category icon, the item art and the count are SEPARATE Images/Text over the
   tile (icon over the strip, art in `ItemIcon`); never push per-slot data into a shared MIC or give the slot its own MID (a driver brush gets no per-instance data).
-  An empty cell uses the Common set plus a dim `ColorAndOpacity` tint, never a different material.
+  An empty cell uses its OWN rest set (`..._Empty_<State>`: `CrescentStrength` 0, `StripHeightPx` 0, `StripLinePx` 0, `GradStrength` 0, `HoverGradBoost` 0, accent = the style's accent for the hover rim): a plain neutral tile (flat fill + border) that keeps hover, selected, drag and invalid cues, with no tint, glyph or count. Filled-to-empty on a recycled entry is a rest-MIC set swap (`StyleTile`), still no per-widget MID.
 - Colours are LINEAR: convert sRGB tokens first (PrjEfz: `EfzInventoryStyle::FromSRGB`; the PrjEfz worked script is `Content/Python/efz_ui_style_mics.py`).
   Hex written as linear renders wrong [WI-1641 measured: PrjEfz idle fill matched its token within 0 levels after conversion].
 - `make_neutral()` makes the HF grey/blue set `MI_HF_UiSurface_*`, `MI_HF_UiMeter_Linear`, `MI_HF_UiMeter_Segmented`.
@@ -195,12 +196,11 @@ colour to transparent (always pass a colour); Overlay children default to Left/T
 is a one-slot pilot owned by a separate item.
 
 Variation tab (p5): `UEfzUiMatLabVariationStation` (`EfzUiMatLabVariation.as`, `WBP_EfzUiMatLab_VariationStation`) with slot `UEfzUiMatLabVariationSlot`
-(`UHF_StateSlotButtonBase`, `WBP_EfzUiMatLab_VariationSlot`) shows 5 rarities x 5 categories, the six forced states per tier, an 8x8 mixed grid, a text-heavy vs tile
-comparison row and a hover line (name | rarity | category | count; the tile itself carries only the count). Palette/geometry as built (DEC-5695): tile 68x68, corner
-radius 4, stroke 1, strip 16 px (master default 14; room for a 12 px glyph + 10 pt count), arc top-right at master defaults, one rest-MIC set per rarity, category glyph
+(`UHF_StateSlotButtonBase`, `WBP_EfzUiMatLab_VariationSlot`) shows 5 rarities x 5 categories, the six forced states per tier, a 4-column x 6-row mixed grid, a text-heavy vs tile
+comparison row and a hover line (name | rarity | category | count; the tile itself carries only the count). Palette/geometry as built (DEC-5695, rescaled in p5b after Scott's second review): tile 112x112 (was 68; all
+groups at one size: 15 tile columns + labels is what fits 1920 px wide), item art 72 px (was 36), corner radius 4, stroke 1 (unchanged), strip 26 px (was 16) with a 20 px glyph + 16 pt count (was 12 px + 10 pt), crescent R 21.5 / 5.75 thick / inset 6.5 (was 13 / 3.5 / 4), `SizeRefPx` 112, empty slots = plain neutral tile (own `Empty` MIC set), one rest-MIC set per rarity, category glyph
 bottom-left and count bottom-right of the strip as separate widgets, lab-local rarity hues (Common 7D8B97, Uncommon C2A878, Rare 2FB5A8, Epic 8E7CE8, Legendary E9A23A;
-PrjEfz has no rarity UI colour source: `UArcItemRarity` has none and `EfzInventoryStyle` has no rarity tokens). Measured [WI-1641 measured, capture only]: strip 15 rows + 1
-stroke row and a 1 px stroke at DPI 1.0 / 0.666 / 0.7606 (arc, stroke and strip are device px, not DPI scaled); Invalid is separable in greyscale (hatch stddev 20.8 vs 0.0 for
+PrjEfz has no rarity UI colour source: `UArcItemRarity` has none and `EfzInventoryStyle` has no rarity tokens). Measured [WI-1641 measured, capture only]: at 68 px strip 15 rows + 1 stroke row and a 1 px stroke at DPI 1.0 / 0.666 / 0.7606 (device px, not DPI scaled); at the 112 px cell (p5b) strip 26 / 17 / 19 px at tile heights 112 / 75 / 85 (DPI 1.0 / 0.666 / 0.7606, following the widget through SizeRefPx), stroke exactly 1 px at all three, an empty tile one flat colour with no crescent or strip; Invalid is separable in greyscale (hatch stddev 20.8 vs 0.0 for
 every other state, min mean gap 17.5). Visual check of `lab_var_1920x1080`: count-only slots, rarity ramp, strip and Invalid hatch clear; after the tuning pass the crescent reads at 68 px at 1920x1080 and at the 1280x720 capture (DPI 0.666) on every rarity including Common (diagonal luma 189 against a ~100 ramp, vs 130 before)
 and Hover is a clear step from Idle (rim luma 62 -> 191-207 and body 33 -> 56 on the Efz tokens, vs -3 / +4 before); Hover stays separable from Selected (88), Eligible (66) and Drag source (45) by body luma and by its bright rim, and Invalid keeps its hatch (stddev 20.8 vs 0.0). Not measured: tile tween in PIE, real hover/click, DPI 1.5/4K, GPU cost of 124 tiles.
 
