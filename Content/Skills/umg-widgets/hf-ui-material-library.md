@@ -37,6 +37,11 @@ RTMSDF copies are MIT (Richard Meredith AB 2022-2025): notice in each asset Desc
 Both are MD_UI, Translucent, straight alpha: colour chain -> Final Color (`MP_EMISSIVE_COLOR`), coverage -> Opacity. Neither has a VertexColor
 node: Slate multiplies `Image.ColorAndOpacity` once after the material, so a static tint works on a shared MIC (drift from DEC-5685,
 which asked for a VertexColor multiply) [WI-1641 measured: tint applied once].
+`M_HF_UiTile` exception, static switch `UseVertexAccent` (default off = `AccentColor`): on, the accent IS the vertex colour
+(`ColorAndOpacity` x brush tint, linear), so one rest MIC per state serves every accent and those cells batch together; the master
+pre-divides its RGB by the vertex colour because Slate still multiplies the output by it (`SlateElementPixelShader.usf` `GetColor`), so
+a tint-as-data material without that divide draws accent x accent (darker, oversaturated) [PrjEfz WI-1645 measured: 63 -> 14 MICs,
+idle inventory capture pixel-identical]. Accent channels must stay > 0; vertex alpha (widget opacity) still fades as usual.
 
 **`M_HF_UiSurface`** (rounded box + inner stroke):
 - Shape: `CornerRadiusPx` 8, `StrokePx` 2.

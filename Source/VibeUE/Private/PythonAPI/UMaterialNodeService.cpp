@@ -31,6 +31,7 @@
 #include "Materials/MaterialParameterCollection.h"
 #include "LandscapeGrassType.h"
 #include "MaterialGraph/MaterialGraph.h"
+#include "EdGraph/EdGraphNode.h"
 #include "MaterialEditingLibrary.h"
 #include "EditorAssetLibrary.h"
 #include "AssetToolsModule.h"
@@ -3688,4 +3689,36 @@ int32 UMaterialNodeService::CleanupUnusedExpressions(const FString& AssetPath)
 		Unused.Num(), *AssetPath);
 
 	return Unused.Num();
+}
+
+// ============================================================================
+// Named reroutes
+// ============================================================================
+
+bool UMaterialNodeService::LinkNamedRerouteUsage(UMaterialExpression* Usage, UMaterialExpression* Declaration)
+{
+	UMaterialExpressionNamedRerouteUsage* RerouteUsage = Cast<UMaterialExpressionNamedRerouteUsage>(Usage);
+	UMaterialExpressionNamedRerouteDeclaration* RerouteDeclaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(Declaration);
+	if (!RerouteUsage || !RerouteDeclaration)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::LinkNamedRerouteUsage: need a NamedRerouteUsage and a NamedRerouteDeclaration (got %s, %s)"),
+			Usage ? *Usage->GetClass()->GetName() : TEXT("null"), Declaration ? *Declaration->GetClass()->GetName() : TEXT("null"));
+		return false;
+	}
+	if (RerouteUsage->Material != RerouteDeclaration->Material || RerouteUsage->Function != RerouteDeclaration->Function)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::LinkNamedRerouteUsage: usage and declaration '%s' live in different materials / functions"),
+			*RerouteDeclaration->Name.ToString());
+		return false;
+	}
+
+	RerouteUsage->Modify();
+	RerouteUsage->Declaration = RerouteDeclaration;
+	RerouteUsage->DeclarationGuid = RerouteDeclaration->VariableGuid;
+	if (RerouteUsage->GraphNode)
+	{
+		RerouteUsage->GraphNode->ReconstructNode();
+	}
+	RerouteUsage->MarkPackageDirty();
+	return true;
 }

@@ -1161,6 +1161,28 @@ public:
 	static int32 CleanupUnusedExpressions(const FString& AssetPath);
 
 	/**
+	 * Link a Named Reroute Usage node to its Declaration (the step the material editor does when you
+	 * place a usage). Python cannot do this itself: UMaterialExpressionNamedRerouteUsage::Declaration and
+	 * DeclarationGuid are plain UPROPERTY() fields, not editable, so set_editor_property refuses them.
+	 *
+	 * Both expressions must already exist in the same material or material function (create them with
+	 * MaterialEditingLibrary.create_material_expression[_in_function]; wire the value into the declaration's
+	 * input and the usage's output onward with connect_material_expressions).
+	 *
+	 * @param Usage       A MaterialExpressionNamedRerouteUsage
+	 * @param Declaration A MaterialExpressionNamedRerouteDeclaration in the same material / function
+	 * @return True when linked; false (with a warning) for a wrong class or a different owner
+	 *
+	 * Example:
+	 *   decl = mel.create_material_expression(mat, unreal.MaterialExpressionNamedRerouteDeclaration, 0, 0)
+	 *   decl.set_editor_property("name", "Accent")
+	 *   use = mel.create_material_expression(mat, unreal.MaterialExpressionNamedRerouteUsage, 400, 0)
+	 *   unreal.MaterialNodeService.link_named_reroute_usage(use, decl)
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "MaterialNode")
+	static bool LinkNamedRerouteUsage(UMaterialExpression* Usage, UMaterialExpression* Declaration);
+
+	/**
 	 * The single source of truth for the material outputs this service understands, as ordered
 	 * (friendly name -> EMaterialProperty) pairs. Both the writers (StringToMaterialProperty, behind
 	 * connect_expression_to_output / disconnect_output) and the reader (GetOutputConnections) are
