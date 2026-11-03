@@ -67,7 +67,7 @@ smaller UI scale makes them proportionally larger; raise `CrescentRadiusPx` / `C
 
 **`M_HF_UiMeter`** (track + fill along width): `FillAmount` 1, `SegmentCount` 0 (0 = continuous), `SegmentGapPx` 2, `CornerRadiusPx` 4, `TrackColor`, `FillColor`.
 
-Regenerate both: `Content/Python/hf_ui_masters.py` via `ue_driver.py py` (idempotent, deletes and recreates; `hf_ui_matlib.py` is the shared graph builder).
+Regenerate both: `Content/Python/hf_ui_masters.py` via `ue_driver.py py` (idempotent, deletes and recreates; `hf_ui_matlib.py` is the shared graph builder; route every reused or long-wired value through its `G.named` named reroutes, per the `materials` skill rule "Named Reroutes Are Graph Variables").
 Authoring traps [WI-1641 measured]: `set_*_static_switch` always returns False (read pixels, not getters); never pass LAYER_PARAMETER for a non-layered
 material (crashes the editor); verify a parameter by capture + `img_check`.
 

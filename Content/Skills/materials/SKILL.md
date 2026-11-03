@@ -90,6 +90,30 @@ capture, `attach_image(...)` the returned file to inspect it.
 >     ed.close_all_editors_for_asset(unreal.load_asset(path))
 > ```
 
+### 🚨 Named Reroutes Are Graph Variables: Use Them for Reused or Long-Wired Values
+
+When a value feeds several nodes, or would be wired across the graph, declare it once as a
+**Named Reroute Declaration** with a meaningful name (`Accent`, `TileUV`, `EdgeMask`) and read it
+through **Named Reroute Usages** placed next to each consumer. Never leave long, crossing or fanned-out
+wires; when you edit an existing graph, convert the fan-outs and long wires you touch. Python can
+create and name a declaration, but it cannot link a usage itself (`Declaration` / `DeclarationGuid` are
+not Blueprint-visible), so link each usage with `MaterialNodeService.link_named_reroute_usage`:
+
+```python
+MEL = unreal.MaterialEditingLibrary
+decl = MEL.create_material_expression(mat, unreal.MaterialExpressionNamedRerouteDeclaration, -600, 0)
+decl.set_editor_property("name", "Accent")       # a clash gets a _N suffix; read the name back
+MEL.connect_material_expressions(accent_param, "", decl, "")
+use = MEL.create_material_expression(mat, unreal.MaterialExpressionNamedRerouteUsage, -200, 0)
+assert unreal.MaterialNodeService.link_named_reroute_usage(use, decl)
+MEL.connect_material_expressions(use, "", multiply, "A")   # one usage per consumer
+```
+
+For a material function, use `create_material_expression_in_function`. Neither `export_material_graph`
+nor `export_function_graph` records a usage's link yet, so a graph recreated from an export loses its
+reroutes. Listing, renaming, usage-by-name, promote-a-fan-out and a readability pass are planned
+(PrjEfz work item WI-1672). Full workflow: `workflows.md` → Named reroutes.
+
 ### 🚨 Tiling on Basic Shapes: Prefer a Child MI with `Tiling` Override
 
 For Megascans `M_MS_Srf` and similar surface materials with a `Tiling` scalar parameter, the cleanest per-actor tiling fix is a **child material instance with `Tiling` overridden** — *not* a UV transform on the mesh. UV transforms apply to all faces uniformly and break orientation; the parent material's UV mapping is already correct per face.
@@ -325,6 +349,7 @@ Common material property internal names: `TwoSided`, `BlendMode`, `ShadingModel`
 | Inspect/export an existing graph | `reference.md` → Export JSON schema | `scripts/export_graph.txt` |
 | Recreate a material from export | `reference.md` → Recreate from export | — |
 | Verify wiring / compile | Critical Rules → `get_material_diagnostics` | — |
+| Reuse a value / avoid long wires (named reroutes) | `workflows.md` → Named reroutes | — |
 
 ## Sub-docs
 

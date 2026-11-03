@@ -33,7 +33,8 @@ The pack's 40 reusable functions, aspect mechanism and which masters to build on
 ## 2. Master vs instance rule
 
 - One master per family. One `MaterialInstanceConstant` per style variant (colours, sizes, roundness). A new
-  master only for a genuinely different node graph.
+  master only for a genuinely different node graph. When you author or edit a master graph, route every reused
+  or long-wired value through named reroutes as graph variables (`materials` skill, Critical Rules).
 - Parameters you write at runtime are STATE only; everything else is instance style and is never touched by script.
 - State names to keep consistent: `Is Hovered`, `Is Active`, `Fill amount`, `Fill progress`. Do not rename pack
   parameters (copied animations key them by name). A NEW state parameter in a project master: 0/1 flags `Is<State>`

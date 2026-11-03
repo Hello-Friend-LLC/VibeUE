@@ -16,6 +16,7 @@ description: Step-by-step material authoring workflows — create a material, ma
 - Collection parameter
 - Static switch / texture object parameter
 - Batch create / connect / set
+- Named reroutes (graph variables)
 
 VibeUE is an extension on Unreal's native MCP endpoint. **Material/function BASICS** (create
 material, add expression, connect, set instance parameters) go through the **engine** material
@@ -208,3 +209,50 @@ mns.connect_expression_to_output(path, created[0].id, "", "BaseColor")
 # (The engine MaterialTools.connect_to_output call_tool path is interchangeable.)
 ```
 Runnable: `scripts/material_graph_batch.txt`.
+
+## Named reroutes (graph variables)
+
+Treat a Named Reroute Declaration as a graph variable: any value that feeds more than one node, or
+would be wired across the graph, is declared once with a meaningful name and read through one Usage
+per consumer (rule in `SKILL.md` → Critical Rules). Python creates and names the declaration;
+`MaterialNodeService.link_named_reroute_usage` links each usage, since the link fields are not
+Blueprint-visible.
+
+```python
+import unreal
+MEL, MNS = unreal.MaterialEditingLibrary, unreal.MaterialNodeService
+
+def declare(owner, name, src, src_out="", x=-800, y=0, is_function=False):
+    create = MEL.create_material_expression_in_function if is_function else MEL.create_material_expression
+    decl = create(owner, unreal.MaterialExpressionNamedRerouteDeclaration, x, y)
+    decl.set_editor_property("name", name)
+    MEL.connect_material_expressions(src, src_out, decl, "")
+    return decl
+
+def use(owner, decl, dst, dst_in, is_function=False):
+    create = MEL.create_material_expression_in_function if is_function else MEL.create_material_expression
+    x = dst.get_editor_property("material_expression_editor_x") - 200
+    y = dst.get_editor_property("material_expression_editor_y")
+    u = create(owner, unreal.MaterialExpressionNamedRerouteUsage, x, y)   # sits next to its consumer
+    if not MNS.link_named_reroute_usage(u, decl):
+        raise RuntimeError("link failed for %s" % decl.get_editor_property("name"))
+    MEL.connect_material_expressions(u, "", dst, dst_in)
+    return u
+
+mat = unreal.load_asset(path)
+accent = declare(mat, "Accent", accent_param)
+for node, pin in [(mul_a, "A"), (lerp_b, "B"), (add_c, "A")]:
+    use(mat, accent, node, pin)
+MEL.recompile_material(mat)
+diag = MNS.get_material_diagnostics(path)   # expect no new compile errors
+```
+
+- A usage with no linked declaration compiles to "Invalid named reroute variable"; if you see that error,
+  a usage was created but not linked.
+- A name clash is renamed to `Name_N` on assignment; read the name back if later code looks it up.
+- In HF projects, HF_Common `Content/Python/hf_ui_matlib.py` wraps this as `G.named(name, ref)`: every
+  consumer of the returned value gets its own usage (used by `M_HF_UiTile`).
+- To rebuild a graph in place, delete node by node and finish with `MNS.cleanup_unused_expressions(path)`
+  (`delete_all_material_expressions` leaves declarations behind, so new ones get `_1` suffixes).
+- `export_material_graph` / `export_function_graph` do not yet record usage links. Listing, renaming,
+  usage-by-name, promote-a-fan-out and a readability pass are planned (PrjEfz work item WI-1672).
