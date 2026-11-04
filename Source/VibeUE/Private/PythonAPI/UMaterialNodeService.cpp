@@ -2001,77 +2001,50 @@ TArray<FMaterialExpressionInfo> UMaterialNodeService::BatchCreateSpecialized(
 // Export Actions
 // =================================================================
 
-FString UMaterialNodeService::ExportMaterialGraph(const FString& MaterialPath)
+// Shared per-expression JSON builder behind export_material_graph, export_function_graph and
+// get_named_reroute_definition (DEC-6297: one serializer, so every consumer sees the same node shape).
+// bFunctionGraph only selects which class-specific extras are emitted (function input/output nodes in a
+// function export; custom / collection / landscape extras in a material export), exactly as the two
+// exporters did before they were merged; the class families are mutually exclusive so key order is stable.
+// The one addition is the "named_reroute" key on reroute declaration / usage nodes (DEC-6246, DEC-6297).
+TSharedPtr<FJsonObject> UMaterialNodeService::ExportExpressionNode(UMaterialExpression* Expr, bool bFunctionGraph)
 {
-	UMaterial* Material = LoadMaterialAsset(MaterialPath);
-	if (!Material)
+	TSharedPtr<FJsonObject> ExprObj = MakeShared<FJsonObject>();
+	ExprObj->SetStringField(TEXT("id"), GetExpressionId(Expr));
+	ExprObj->SetStringField(TEXT("class"), Expr->GetClass()->GetName().Replace(TEXT("MaterialExpression"), TEXT("")));
+	ExprObj->SetStringField(TEXT("class_full"), Expr->GetClass()->GetName());
+	ExprObj->SetNumberField(TEXT("pos_x"), Expr->MaterialExpressionEditorX);
+	ExprObj->SetNumberField(TEXT("pos_y"), Expr->MaterialExpressionEditorY);
+
+	// Properties — exclude parameter identity fields since they are exported
+	// as dedicated top-level fields (parameter_name, group). Including them
+	// in properties causes batch_set_properties to overwrite parameter names.
+	static const TSet<FString> ExcludedPropertyNames = {
+		TEXT("ParameterName"),
+		TEXT("Group"),
+		TEXT("ExpressionGUID"),
+		TEXT("MaterialExpressionEditorX"),
+		TEXT("MaterialExpressionEditorY"),
+	};
+	TSharedRef<FJsonObject> PropsObj = MakeShared<FJsonObject>();
+	for (TFieldIterator<FProperty> PropIt(Expr->GetClass()); PropIt; ++PropIt)
 	{
-		return FString();
-	}
+		FProperty* Prop = *PropIt;
+		if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient)) continue;
+		if (!Prop->HasAnyPropertyFlags(CPF_Edit)) continue;
+		if (ExcludedPropertyNames.Contains(Prop->GetName())) continue;
 
-	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-
-	// Material settings
-	TSharedRef<FJsonObject> MatSettings = MakeShared<FJsonObject>();
-	MatSettings->SetStringField(TEXT("blend_mode"), *UEnum::GetValueAsString(Material->BlendMode));
-	MatSettings->SetStringField(TEXT("shading_model"), *UEnum::GetValueAsString(Material->GetShadingModels().GetFirstShadingModel()));
-	MatSettings->SetBoolField(TEXT("two_sided"), Material->IsTwoSided());
-	Root->SetObjectField(TEXT("material"), MatSettings);
-
-	// All expressions
-	TArray<TSharedPtr<FJsonValue>> ExpressionsArray;
-	TArray<UMaterialExpression*> AllExpressions;
-	Material->GetAllExpressionsInMaterialAndFunctionsOfType<UMaterialExpression>(AllExpressions);
-
-	// Only include top-level expressions (not inside material functions)
-	TArray<UMaterialExpression*> TopLevelExpressions;
-	for (UMaterialExpression* Expr : AllExpressions)
-	{
-		if (Expr && Expr->GetOuter() == Material)
+		FString Value;
+		Prop->ExportTextItem_Direct(Value, Prop->ContainerPtrToValuePtr<void>(Expr), nullptr, Expr, PPF_None);
+		if (!Value.IsEmpty())
 		{
-			TopLevelExpressions.Add(Expr);
+			PropsObj->SetStringField(Prop->GetName(), Value);
 		}
 	}
+	ExprObj->SetObjectField(TEXT("properties"), PropsObj);
 
-	for (UMaterialExpression* Expr : TopLevelExpressions)
+	auto AddParameterInfo = [&]()
 	{
-		if (!Expr) continue;
-
-		TSharedRef<FJsonObject> ExprObj = MakeShared<FJsonObject>();
-		ExprObj->SetStringField(TEXT("id"), GetExpressionId(Expr));
-		ExprObj->SetStringField(TEXT("class"), Expr->GetClass()->GetName().Replace(TEXT("MaterialExpression"), TEXT("")));
-		ExprObj->SetStringField(TEXT("class_full"), Expr->GetClass()->GetName());
-		ExprObj->SetNumberField(TEXT("pos_x"), Expr->MaterialExpressionEditorX);
-		ExprObj->SetNumberField(TEXT("pos_y"), Expr->MaterialExpressionEditorY);
-
-		// Properties — exclude parameter identity fields since they are exported
-		// as dedicated top-level fields (parameter_name, group). Including them
-		// in properties causes batch_set_properties to overwrite parameter names.
-		static const TSet<FString> ExcludedPropertyNames = {
-			TEXT("ParameterName"),
-			TEXT("Group"),
-			TEXT("ExpressionGUID"),
-			TEXT("MaterialExpressionEditorX"),
-			TEXT("MaterialExpressionEditorY"),
-		};
-		TSharedRef<FJsonObject> PropsObj = MakeShared<FJsonObject>();
-		for (TFieldIterator<FProperty> PropIt(Expr->GetClass()); PropIt; ++PropIt)
-		{
-			FProperty* Prop = *PropIt;
-			if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient)) continue;
-			if (!Prop->HasAnyPropertyFlags(CPF_Edit)) continue;
-			if (ExcludedPropertyNames.Contains(Prop->GetName())) continue;
-
-			FString Value;
-			Prop->ExportTextItem_Direct(Value, Prop->ContainerPtrToValuePtr<void>(Expr), nullptr, Expr, PPF_None);
-			if (!Value.IsEmpty())
-			{
-				PropsObj->SetStringField(Prop->GetName(), Value);
-			}
-		}
-		ExprObj->SetObjectField(TEXT("properties"), PropsObj);
-
-		// Parameter info
 		if (UMaterialExpressionParameter* ParamExpr = Cast<UMaterialExpressionParameter>(Expr))
 		{
 			ExprObj->SetBoolField(TEXT("is_parameter"), true);
@@ -2084,8 +2057,9 @@ FString UMaterialNodeService::ExportMaterialGraph(const FString& MaterialPath)
 			ExprObj->SetStringField(TEXT("parameter_name"), TexParamExpr->ParameterName.ToString());
 			ExprObj->SetStringField(TEXT("group"), TexParamExpr->Group.ToString());
 		}
-
-		// Function call info
+	};
+	auto AddFunctionCallInfo = [&]()
+	{
 		if (UMaterialExpressionMaterialFunctionCall* FuncCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expr))
 		{
 			if (FuncCall->MaterialFunction)
@@ -2093,6 +2067,38 @@ FString UMaterialNodeService::ExportMaterialGraph(const FString& MaterialPath)
 				ExprObj->SetStringField(TEXT("function_path"), FuncCall->MaterialFunction->GetPathName());
 			}
 		}
+	};
+
+	if (bFunctionGraph)
+	{
+		// Function Input info
+		if (UMaterialExpressionFunctionInput* FuncInput = Cast<UMaterialExpressionFunctionInput>(Expr))
+		{
+			ExprObj->SetBoolField(TEXT("is_function_input"), true);
+			ExprObj->SetStringField(TEXT("input_name"), FuncInput->InputName.ToString());
+			ExprObj->SetStringField(TEXT("description"), FuncInput->Description);
+			ExprObj->SetNumberField(TEXT("input_type"), (int32)FuncInput->InputType);
+			ExprObj->SetStringField(TEXT("input_type_name"), FunctionInputTypeToString((int32)FuncInput->InputType));
+			ExprObj->SetNumberField(TEXT("sort_priority"), FuncInput->SortPriority);
+			ExprObj->SetBoolField(TEXT("use_preview_value_as_default"), FuncInput->bUsePreviewValueAsDefault);
+		}
+
+		// Function Output info
+		if (UMaterialExpressionFunctionOutput* FuncOutput = Cast<UMaterialExpressionFunctionOutput>(Expr))
+		{
+			ExprObj->SetBoolField(TEXT("is_function_output"), true);
+			ExprObj->SetStringField(TEXT("output_name"), FuncOutput->OutputName.ToString());
+			ExprObj->SetStringField(TEXT("description"), FuncOutput->Description);
+			ExprObj->SetNumberField(TEXT("sort_priority"), FuncOutput->SortPriority);
+		}
+
+		AddFunctionCallInfo();
+		AddParameterInfo();
+	}
+	else
+	{
+		AddParameterInfo();
+		AddFunctionCallInfo();
 
 		// Custom expression info (ISSUE-4: include custom_input_names)
 		if (UMaterialExpressionCustom* CustomExpr = Cast<UMaterialExpressionCustom>(Expr))
@@ -2167,28 +2173,156 @@ FString UMaterialNodeService::ExportMaterialGraph(const FString& MaterialPath)
 			}
 			ExprObj->SetArrayField(TEXT("grass_types"), GrassArr);
 		}
+	}
 
-		// Inputs
-		TArray<TSharedPtr<FJsonValue>> InputsArr;
-		for (int32 i = 0; Expr->GetInput(i) != nullptr; i++)
+	// Inputs
+	TArray<TSharedPtr<FJsonValue>> InputsArr;
+	for (int32 i = 0; Expr->GetInput(i) != nullptr; i++)
+	{
+		FName InputName = Expr->GetInputName(i);
+		FString InputStr = InputName.IsNone() ? FString::Printf(TEXT("Input_%d"), i) : InputName.ToString();
+		InputsArr.Add(MakeShared<FJsonValueString>(InputStr));
+	}
+	ExprObj->SetArrayField(TEXT("inputs"), InputsArr);
+
+	// Outputs
+	TArray<TSharedPtr<FJsonValue>> OutputsArr;
+	TArray<FExpressionOutput>& Outputs = Expr->GetOutputs();
+	for (int32 i = 0; i < Outputs.Num(); i++)
+	{
+		FString OutputStr = Outputs[i].OutputName.IsNone() ? FString::Printf(TEXT("Output_%d"), i) : Outputs[i].OutputName.ToString();
+		OutputsArr.Add(MakeShared<FJsonValueString>(OutputStr));
+	}
+	ExprObj->SetArrayField(TEXT("outputs"), OutputsArr);
+
+	// Named reroute link (additive, last key). Names and guid are the persistent keys; declaration_id is a
+	// session id that does not survive a reload. A usage whose declaration is gone is flagged broken.
+	if (const UMaterialExpressionNamedRerouteDeclaration* Declaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(Expr))
+	{
+		TSharedRef<FJsonObject> Reroute = MakeShared<FJsonObject>();
+		Reroute->SetStringField(TEXT("role"), TEXT("declaration"));
+		Reroute->SetStringField(TEXT("name"), Declaration->Name.ToString());
+		Reroute->SetStringField(TEXT("guid"), Declaration->VariableGuid.ToString(EGuidFormats::DigitsWithHyphens));
+		Reroute->SetStringField(TEXT("declaration_id"), GetExpressionId(Expr));
+		ExprObj->SetObjectField(TEXT("named_reroute"), Reroute);
+	}
+	else if (const UMaterialExpressionNamedRerouteUsage* Usage = Cast<UMaterialExpressionNamedRerouteUsage>(Expr))
+	{
+		const UMaterialExpressionNamedRerouteDeclaration* UsageDeclaration = Usage->Declaration;
+		TSharedRef<FJsonObject> Reroute = MakeShared<FJsonObject>();
+		Reroute->SetStringField(TEXT("role"), TEXT("usage"));
+		if (IsValid(UsageDeclaration))
 		{
-			FName InputName = Expr->GetInputName(i);
-			FString InputStr = InputName.IsNone() ? FString::Printf(TEXT("Input_%d"), i) : InputName.ToString();
-			InputsArr.Add(MakeShared<FJsonValueString>(InputStr));
+			Reroute->SetStringField(TEXT("name"), UsageDeclaration->Name.ToString());
+			Reroute->SetStringField(TEXT("guid"), UsageDeclaration->VariableGuid.ToString(EGuidFormats::DigitsWithHyphens));
+			Reroute->SetStringField(TEXT("declaration_id"), GetExpressionId(const_cast<UMaterialExpressionNamedRerouteDeclaration*>(UsageDeclaration)));
 		}
-		ExprObj->SetArrayField(TEXT("inputs"), InputsArr);
-
-		// Outputs
-		TArray<TSharedPtr<FJsonValue>> OutputsArr;
-		TArray<FExpressionOutput>& Outputs = Expr->GetOutputs();
-		for (int32 i = 0; i < Outputs.Num(); i++)
+		else
 		{
-			FString OutputStr = Outputs[i].OutputName.IsNone() ? FString::Printf(TEXT("Output_%d"), i) : Outputs[i].OutputName.ToString();
-			OutputsArr.Add(MakeShared<FJsonValueString>(OutputStr));
+			Reroute->SetBoolField(TEXT("broken"), true);
+			Reroute->SetStringField(TEXT("name"), FString());
+			Reroute->SetStringField(TEXT("guid"), Usage->DeclarationGuid.ToString(EGuidFormats::DigitsWithHyphens));
+			Reroute->SetStringField(TEXT("declaration_id"), FString());
 		}
-		ExprObj->SetArrayField(TEXT("outputs"), OutputsArr);
+		ExprObj->SetObjectField(TEXT("named_reroute"), Reroute);
+	}
 
-		ExpressionsArray.Add(MakeShared<FJsonValueObject>(ExprObj));
+	return ExprObj;
+}
+
+// One connection object (source -> Expr input InputIndex), shared by the exports and the definition.
+TSharedPtr<FJsonObject> UMaterialNodeService::ExportConnection(UMaterialExpression* Expr, int32 InputIndex, bool bFunctionGraph)
+{
+	FExpressionInput* Input = Expr->GetInput(InputIndex);
+	if (!Input || !Input->Expression)
+	{
+		return nullptr;
+	}
+
+	TSharedPtr<FJsonObject> ConnObj = MakeShared<FJsonObject>();
+	ConnObj->SetStringField(TEXT("source_id"), GetExpressionId(Input->Expression));
+	ConnObj->SetNumberField(TEXT("source_output_index"), Input->OutputIndex);
+
+	// ISSUE-1: Also emit source_output_name for use with connect APIs
+	TArray<FExpressionOutput>& SourceOutputs = Input->Expression->GetOutputs();
+	FString SourceOutputName;
+	if (Input->OutputIndex >= 0 && Input->OutputIndex < SourceOutputs.Num())
+	{
+		SourceOutputName = SourceOutputs[Input->OutputIndex].OutputName.IsNone()
+			? TEXT("")
+			: SourceOutputs[Input->OutputIndex].OutputName.ToString();
+	}
+	ConnObj->SetStringField(TEXT("source_output_name"), SourceOutputName);
+
+	ConnObj->SetStringField(TEXT("target_id"), GetExpressionId(Expr));
+	FName InputName = Expr->GetInputName(InputIndex);
+	ConnObj->SetStringField(TEXT("target_input"), InputName.IsNone() ? FString::Printf(TEXT("Input_%d"), InputIndex) : InputName.ToString());
+
+	// ISSUE-8: Flag layer blend connections with structured data (material exports only)
+	if (!bFunctionGraph && Cast<UMaterialExpressionLandscapeLayerBlend>(Expr))
+	{
+		ConnObj->SetBoolField(TEXT("is_layer_blend_input"), true);
+		// Determine which layer this input belongs to
+		// Layer inputs are: Layer0, Height0, Layer1, Height1, ...
+		FString InputStr = InputName.IsNone() ? FString::Printf(TEXT("Input_%d"), InputIndex) : InputName.ToString();
+		FString InputType;
+		FString LayerNameStr;
+		// Parse e.g. "Layer Grass" or "Height Grass" format
+		if (InputStr.StartsWith(TEXT("Layer ")))
+		{
+			InputType = TEXT("Layer");
+			LayerNameStr = InputStr.RightChop(6);
+		}
+		else if (InputStr.StartsWith(TEXT("Height ")))
+		{
+			InputType = TEXT("Height");
+			LayerNameStr = InputStr.RightChop(7);
+		}
+		if (!InputType.IsEmpty())
+		{
+			ConnObj->SetStringField(TEXT("layer_input_type"), InputType);
+			ConnObj->SetStringField(TEXT("layer_name"), LayerNameStr);
+		}
+	}
+	return ConnObj;
+}
+
+FString UMaterialNodeService::ExportMaterialGraph(const FString& MaterialPath)
+{
+	UMaterial* Material = LoadMaterialAsset(MaterialPath);
+	if (!Material)
+	{
+		return FString();
+	}
+
+	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+
+	// Material settings
+	TSharedRef<FJsonObject> MatSettings = MakeShared<FJsonObject>();
+	MatSettings->SetStringField(TEXT("blend_mode"), *UEnum::GetValueAsString(Material->BlendMode));
+	MatSettings->SetStringField(TEXT("shading_model"), *UEnum::GetValueAsString(Material->GetShadingModels().GetFirstShadingModel()));
+	MatSettings->SetBoolField(TEXT("two_sided"), Material->IsTwoSided());
+	Root->SetObjectField(TEXT("material"), MatSettings);
+
+	// All expressions
+	TArray<TSharedPtr<FJsonValue>> ExpressionsArray;
+	TArray<UMaterialExpression*> AllExpressions;
+	Material->GetAllExpressionsInMaterialAndFunctionsOfType<UMaterialExpression>(AllExpressions);
+
+	// Only include top-level expressions (not inside material functions)
+	TArray<UMaterialExpression*> TopLevelExpressions;
+	for (UMaterialExpression* Expr : AllExpressions)
+	{
+		if (Expr && Expr->GetOuter() == Material)
+		{
+			TopLevelExpressions.Add(Expr);
+		}
+	}
+
+	for (UMaterialExpression* Expr : TopLevelExpressions)
+	{
+		if (!Expr) continue;
+		ExpressionsArray.Add(MakeShared<FJsonValueObject>(ExportExpressionNode(Expr, /*bFunctionGraph*/ false)));
 	}
 	Root->SetArrayField(TEXT("expressions"), ExpressionsArray);
 
@@ -2198,58 +2332,10 @@ FString UMaterialNodeService::ExportMaterialGraph(const FString& MaterialPath)
 	{
 		if (!Expr) continue;
 
-		for (int32 i = 0; ; i++)
+		for (int32 i = 0; Expr->GetInput(i) != nullptr; i++)
 		{
-			FExpressionInput* Input = Expr->GetInput(i);
-			if (!Input) break;
-			if (Input->Expression)
+			if (TSharedPtr<FJsonObject> ConnObj = ExportConnection(Expr, i, /*bFunctionGraph*/ false))
 			{
-				TSharedRef<FJsonObject> ConnObj = MakeShared<FJsonObject>();
-				ConnObj->SetStringField(TEXT("source_id"), GetExpressionId(Input->Expression));
-				ConnObj->SetNumberField(TEXT("source_output_index"), Input->OutputIndex);
-
-				// ISSUE-1: Also emit source_output_name for use with connect APIs
-				TArray<FExpressionOutput>& SourceOutputs = Input->Expression->GetOutputs();
-				FString SourceOutputName;
-				if (Input->OutputIndex >= 0 && Input->OutputIndex < SourceOutputs.Num())
-				{
-					SourceOutputName = SourceOutputs[Input->OutputIndex].OutputName.IsNone()
-						? TEXT("")
-						: SourceOutputs[Input->OutputIndex].OutputName.ToString();
-				}
-				ConnObj->SetStringField(TEXT("source_output_name"), SourceOutputName);
-
-				ConnObj->SetStringField(TEXT("target_id"), GetExpressionId(Expr));
-				FName InputName = Expr->GetInputName(i);
-				ConnObj->SetStringField(TEXT("target_input"), InputName.IsNone() ? FString::Printf(TEXT("Input_%d"), i) : InputName.ToString());
-
-				// ISSUE-8: Flag layer blend connections with structured data
-				if (UMaterialExpressionLandscapeLayerBlend* BlendTarget = Cast<UMaterialExpressionLandscapeLayerBlend>(Expr))
-				{
-					ConnObj->SetBoolField(TEXT("is_layer_blend_input"), true);
-					// Determine which layer this input belongs to
-					// Layer inputs are: Layer0, Height0, Layer1, Height1, ...
-					FString InputStr = InputName.IsNone() ? FString::Printf(TEXT("Input_%d"), i) : InputName.ToString();
-					FString InputType;
-					FString LayerNameStr;
-					// Parse e.g. "Layer Grass" or "Height Grass" format
-					if (InputStr.StartsWith(TEXT("Layer ")))
-					{
-						InputType = TEXT("Layer");
-						LayerNameStr = InputStr.RightChop(6);
-					}
-					else if (InputStr.StartsWith(TEXT("Height ")))
-					{
-						InputType = TEXT("Height");
-						LayerNameStr = InputStr.RightChop(7);
-					}
-					if (!InputType.IsEmpty())
-					{
-						ConnObj->SetStringField(TEXT("layer_input_type"), InputType);
-						ConnObj->SetStringField(TEXT("layer_name"), LayerNameStr);
-					}
-				}
-
 				ConnectionsArray.Add(MakeShared<FJsonValueObject>(ConnObj));
 			}
 		}
@@ -3037,104 +3123,7 @@ FString UMaterialNodeService::ExportFunctionGraph(const FString& FunctionPath)
 	for (UMaterialExpression* Expr : Expressions)
 	{
 		if (!Expr) continue;
-
-		TSharedRef<FJsonObject> ExprObj = MakeShared<FJsonObject>();
-		ExprObj->SetStringField(TEXT("id"), GetExpressionId(Expr));
-		ExprObj->SetStringField(TEXT("class"), Expr->GetClass()->GetName().Replace(TEXT("MaterialExpression"), TEXT("")));
-		ExprObj->SetStringField(TEXT("class_full"), Expr->GetClass()->GetName());
-		ExprObj->SetNumberField(TEXT("pos_x"), Expr->MaterialExpressionEditorX);
-		ExprObj->SetNumberField(TEXT("pos_y"), Expr->MaterialExpressionEditorY);
-
-		// Properties
-		static const TSet<FString> ExcludedPropertyNames = {
-			TEXT("ParameterName"),
-			TEXT("Group"),
-			TEXT("ExpressionGUID"),
-			TEXT("MaterialExpressionEditorX"),
-			TEXT("MaterialExpressionEditorY"),
-		};
-		TSharedRef<FJsonObject> PropsObj = MakeShared<FJsonObject>();
-		for (TFieldIterator<FProperty> PropIt(Expr->GetClass()); PropIt; ++PropIt)
-		{
-			FProperty* Prop = *PropIt;
-			if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient)) continue;
-			if (!Prop->HasAnyPropertyFlags(CPF_Edit)) continue;
-			if (ExcludedPropertyNames.Contains(Prop->GetName())) continue;
-
-			FString Value;
-			Prop->ExportTextItem_Direct(Value, Prop->ContainerPtrToValuePtr<void>(Expr), nullptr, Expr, PPF_None);
-			if (!Value.IsEmpty())
-			{
-				PropsObj->SetStringField(Prop->GetName(), Value);
-			}
-		}
-		ExprObj->SetObjectField(TEXT("properties"), PropsObj);
-
-		// Function Input info
-		if (UMaterialExpressionFunctionInput* FuncInput = Cast<UMaterialExpressionFunctionInput>(Expr))
-		{
-			ExprObj->SetBoolField(TEXT("is_function_input"), true);
-			ExprObj->SetStringField(TEXT("input_name"), FuncInput->InputName.ToString());
-			ExprObj->SetStringField(TEXT("description"), FuncInput->Description);
-			ExprObj->SetNumberField(TEXT("input_type"), (int32)FuncInput->InputType);
-			ExprObj->SetStringField(TEXT("input_type_name"), FunctionInputTypeToString((int32)FuncInput->InputType));
-			ExprObj->SetNumberField(TEXT("sort_priority"), FuncInput->SortPriority);
-			ExprObj->SetBoolField(TEXT("use_preview_value_as_default"), FuncInput->bUsePreviewValueAsDefault);
-		}
-
-		// Function Output info
-		if (UMaterialExpressionFunctionOutput* FuncOutput = Cast<UMaterialExpressionFunctionOutput>(Expr))
-		{
-			ExprObj->SetBoolField(TEXT("is_function_output"), true);
-			ExprObj->SetStringField(TEXT("output_name"), FuncOutput->OutputName.ToString());
-			ExprObj->SetStringField(TEXT("description"), FuncOutput->Description);
-			ExprObj->SetNumberField(TEXT("sort_priority"), FuncOutput->SortPriority);
-		}
-
-		// Function call info
-		if (UMaterialExpressionMaterialFunctionCall* FuncCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expr))
-		{
-			if (FuncCall->MaterialFunction)
-			{
-				ExprObj->SetStringField(TEXT("function_path"), FuncCall->MaterialFunction->GetPathName());
-			}
-		}
-
-		// Parameter info
-		if (UMaterialExpressionParameter* ParamExpr = Cast<UMaterialExpressionParameter>(Expr))
-		{
-			ExprObj->SetBoolField(TEXT("is_parameter"), true);
-			ExprObj->SetStringField(TEXT("parameter_name"), ParamExpr->ParameterName.ToString());
-			ExprObj->SetStringField(TEXT("group"), ParamExpr->Group.ToString());
-		}
-		else if (UMaterialExpressionTextureSampleParameter* TexParamExpr = Cast<UMaterialExpressionTextureSampleParameter>(Expr))
-		{
-			ExprObj->SetBoolField(TEXT("is_parameter"), true);
-			ExprObj->SetStringField(TEXT("parameter_name"), TexParamExpr->ParameterName.ToString());
-			ExprObj->SetStringField(TEXT("group"), TexParamExpr->Group.ToString());
-		}
-
-		// Inputs
-		TArray<TSharedPtr<FJsonValue>> InputsArr;
-		for (int32 i = 0; Expr->GetInput(i) != nullptr; i++)
-		{
-			FName InputName = Expr->GetInputName(i);
-			FString InputStr = InputName.IsNone() ? FString::Printf(TEXT("Input_%d"), i) : InputName.ToString();
-			InputsArr.Add(MakeShared<FJsonValueString>(InputStr));
-		}
-		ExprObj->SetArrayField(TEXT("inputs"), InputsArr);
-
-		// Outputs
-		TArray<TSharedPtr<FJsonValue>> OutputsArr;
-		TArray<FExpressionOutput>& Outputs = Expr->GetOutputs();
-		for (int32 i = 0; i < Outputs.Num(); i++)
-		{
-			FString OutputStr = Outputs[i].OutputName.IsNone() ? FString::Printf(TEXT("Output_%d"), i) : Outputs[i].OutputName.ToString();
-			OutputsArr.Add(MakeShared<FJsonValueString>(OutputStr));
-		}
-		ExprObj->SetArrayField(TEXT("outputs"), OutputsArr);
-
-		ExpressionsArray.Add(MakeShared<FJsonValueObject>(ExprObj));
+		ExpressionsArray.Add(MakeShared<FJsonValueObject>(ExportExpressionNode(Expr, /*bFunctionGraph*/ true)));
 	}
 	Root->SetArrayField(TEXT("expressions"), ExpressionsArray);
 
@@ -3144,30 +3133,10 @@ FString UMaterialNodeService::ExportFunctionGraph(const FString& FunctionPath)
 	{
 		if (!Expr) continue;
 
-		for (int32 i = 0; ; i++)
+		for (int32 i = 0; Expr->GetInput(i) != nullptr; i++)
 		{
-			FExpressionInput* Input = Expr->GetInput(i);
-			if (!Input) break;
-			if (Input->Expression)
+			if (TSharedPtr<FJsonObject> ConnObj = ExportConnection(Expr, i, /*bFunctionGraph*/ true))
 			{
-				TSharedRef<FJsonObject> ConnObj = MakeShared<FJsonObject>();
-				ConnObj->SetStringField(TEXT("source_id"), GetExpressionId(Input->Expression));
-				ConnObj->SetNumberField(TEXT("source_output_index"), Input->OutputIndex);
-
-				TArray<FExpressionOutput>& SourceOutputs = Input->Expression->GetOutputs();
-				FString SourceOutputName;
-				if (Input->OutputIndex >= 0 && Input->OutputIndex < SourceOutputs.Num())
-				{
-					SourceOutputName = SourceOutputs[Input->OutputIndex].OutputName.IsNone()
-						? TEXT("")
-						: SourceOutputs[Input->OutputIndex].OutputName.ToString();
-				}
-				ConnObj->SetStringField(TEXT("source_output_name"), SourceOutputName);
-
-				ConnObj->SetStringField(TEXT("target_id"), GetExpressionId(Expr));
-				FName InputName = Expr->GetInputName(i);
-				ConnObj->SetStringField(TEXT("target_input"), InputName.IsNone() ? FString::Printf(TEXT("Input_%d"), i) : InputName.ToString());
-
 				ConnectionsArray.Add(MakeShared<FJsonValueObject>(ConnObj));
 			}
 		}
@@ -4137,4 +4106,230 @@ FString UMaterialNodeService::RenameNamedRerouteDeclaration(
 
 	RefreshOwner(Owner);
 	return Declaration->Name.ToString();
+}
+
+namespace
+{
+	// Walk boundary of get_named_reroute_definition: the kind string for an expression that is a leaf of a
+	// variable's generating subgraph (listed as an input, never walked past); nullptr for an ordinary node.
+	const TCHAR* ClassifyDefinitionBoundary(const UMaterialExpression* Expression)
+	{
+		if (Cast<UMaterialExpressionTextureObjectParameter>(Expression)) return TEXT("texture_object_parameter");
+		if (Cast<UMaterialExpressionParameter>(Expression)) return TEXT("parameter");
+		if (Cast<UMaterialExpressionConstant>(Expression) || Cast<UMaterialExpressionConstant2Vector>(Expression) ||
+			Cast<UMaterialExpressionConstant3Vector>(Expression) || Cast<UMaterialExpressionConstant4Vector>(Expression))
+		{
+			return TEXT("constant");
+		}
+		if (Cast<UMaterialExpressionTextureObject>(Expression)) return TEXT("texture_object");
+		if (Cast<UMaterialExpressionFunctionInput>(Expression)) return TEXT("function_input");
+		if (Cast<UMaterialExpressionNamedRerouteUsage>(Expression)) return TEXT("named_reroute_usage");
+		return nullptr;
+	}
+
+	TSharedRef<FJsonObject> MakePosObject(const UMaterialExpression* Expression)
+	{
+		TSharedRef<FJsonObject> Pos = MakeShared<FJsonObject>();
+		Pos->SetNumberField(TEXT("x"), Expression->MaterialExpressionEditorX);
+		Pos->SetNumberField(TEXT("y"), Expression->MaterialExpressionEditorY);
+		return Pos;
+	}
+}
+
+FString UMaterialNodeService::GetNamedRerouteDefinition(const FString& AssetPath, const FString& DeclarationName)
+{
+	FVibeMaterialGraphOwner Owner;
+	if (!ResolveGraphOwner(AssetPath, Owner, TEXT("GetNamedRerouteDefinition")))
+	{
+		return FString();
+	}
+	FString Error;
+	UMaterialExpressionNamedRerouteDeclaration* Declaration = FindDeclarationByName(Owner, DeclarationName, Error);
+	if (!Declaration)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::GetNamedRerouteDefinition: %s in '%s'"), *Error, *AssetPath);
+		return FString();
+	}
+	const bool bFunctionGraph = Owner.Function != nullptr;
+
+	// --- Walk back from the declaration's input through every connected input, inside this asset only.
+	//     Boundary nodes (parameters, constants, texture objects, function inputs, usages of OTHER named
+	//     reroutes) are collected but their own inputs are not followed: nested variables are dependencies,
+	//     never inlined. ---
+	TSet<const UMaterialExpression*> Visited;
+	TArray<UMaterialExpression*> Stack;
+	if (Declaration->Input.Expression)
+	{
+		Stack.Add(Declaration->Input.Expression);
+	}
+	while (Stack.Num() > 0)
+	{
+		UMaterialExpression* Expression = Stack.Pop();
+		if (!Expression || Visited.Contains(Expression) || !Owner.Owns(Expression))
+		{
+			continue;
+		}
+		Visited.Add(Expression);
+		if (ClassifyDefinitionBoundary(Expression))
+		{
+			continue;
+		}
+		for (int32 i = 0; Expression->GetInput(i) != nullptr; i++)
+		{
+			if (UMaterialExpression* Source = Expression->GetInput(i)->Expression)
+			{
+				Stack.Add(Source);
+			}
+		}
+	}
+
+	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetStringField(TEXT("owner"), bFunctionGraph ? TEXT("material_function") : TEXT("material"));
+
+	TSharedRef<FJsonObject> DeclObj = MakeShared<FJsonObject>();
+	DeclObj->SetStringField(TEXT("id"), GetExpressionId(Declaration));
+	DeclObj->SetStringField(TEXT("name"), Declaration->Name.ToString());
+	TSharedRef<FJsonObject> ColorObj = MakeShared<FJsonObject>();
+	ColorObj->SetNumberField(TEXT("r"), Declaration->NodeColor.R);
+	ColorObj->SetNumberField(TEXT("g"), Declaration->NodeColor.G);
+	ColorObj->SetNumberField(TEXT("b"), Declaration->NodeColor.B);
+	ColorObj->SetNumberField(TEXT("a"), Declaration->NodeColor.A);
+	DeclObj->SetObjectField(TEXT("node_color"), ColorObj);
+	DeclObj->SetStringField(TEXT("variable_guid"), Declaration->VariableGuid.ToString(EGuidFormats::DigitsWithHyphens));
+	DeclObj->SetObjectField(TEXT("pos"), MakePosObject(Declaration));
+	Root->SetObjectField(TEXT("declaration"), DeclObj);
+
+	// --- nodes / inputs / connections, in the asset's expression order (deterministic). Every node object
+	//     and connection object comes from the same builders as export_material_graph / export_function_graph. ---
+	TArray<TSharedPtr<FJsonValue>> NodesArray;
+	TArray<TSharedPtr<FJsonValue>> InputsArray;
+	TArray<TSharedPtr<FJsonValue>> ConnectionsArray;
+	for (UMaterialExpression* Expression : Owner.Expressions())
+	{
+		if (!Expression || !Visited.Contains(Expression))
+		{
+			continue;
+		}
+		NodesArray.Add(MakeShared<FJsonValueObject>(ExportExpressionNode(Expression, bFunctionGraph)));
+
+		if (const TCHAR* Kind = ClassifyDefinitionBoundary(Expression))
+		{
+			TSharedRef<FJsonObject> InputObj = MakeShared<FJsonObject>();
+			if (const UMaterialExpressionNamedRerouteUsage* Usage = Cast<UMaterialExpressionNamedRerouteUsage>(Expression))
+			{
+				const UMaterialExpressionNamedRerouteDeclaration* DependsOn = Usage->Declaration;
+				InputObj->SetStringField(TEXT("usage_id"), GetExpressionId(Expression));
+				InputObj->SetStringField(TEXT("kind"), Kind);
+				InputObj->SetStringField(TEXT("depends_on"), IsValid(DependsOn) ? DependsOn->Name.ToString() : FString());
+			}
+			else
+			{
+				FString Name;
+				if (const UMaterialExpressionParameter* Parameter = Cast<UMaterialExpressionParameter>(Expression))
+				{
+					Name = Parameter->ParameterName.ToString();
+				}
+				else if (const UMaterialExpressionTextureObjectParameter* TextureParameter = Cast<UMaterialExpressionTextureObjectParameter>(Expression))
+				{
+					Name = TextureParameter->ParameterName.ToString();
+				}
+				else if (const UMaterialExpressionFunctionInput* FunctionInput = Cast<UMaterialExpressionFunctionInput>(Expression))
+				{
+					Name = FunctionInput->InputName.ToString();
+				}
+				InputObj->SetStringField(TEXT("expression_id"), GetExpressionId(Expression));
+				InputObj->SetStringField(TEXT("kind"), Kind);
+				InputObj->SetStringField(TEXT("class_full"), Expression->GetClass()->GetName());
+				InputObj->SetStringField(TEXT("name"), Name);
+			}
+			InputsArray.Add(MakeShared<FJsonValueObject>(InputObj));
+			continue; // boundary: its own inputs are not part of the definition
+		}
+
+		for (int32 i = 0; Expression->GetInput(i) != nullptr; i++)
+		{
+			if (TSharedPtr<FJsonObject> ConnObj = ExportConnection(Expression, i, bFunctionGraph))
+			{
+				ConnectionsArray.Add(MakeShared<FJsonValueObject>(ConnObj));
+			}
+		}
+	}
+	// The wire into the declaration itself (target_id = declaration.id).
+	for (int32 i = 0; Declaration->GetInput(i) != nullptr; i++)
+	{
+		if (TSharedPtr<FJsonObject> ConnObj = ExportConnection(Declaration, i, bFunctionGraph))
+		{
+			ConnectionsArray.Add(MakeShared<FJsonValueObject>(ConnObj));
+		}
+	}
+	Root->SetArrayField(TEXT("nodes"), NodesArray);
+	Root->SetArrayField(TEXT("connections"), ConnectionsArray);
+	Root->SetArrayField(TEXT("inputs"), InputsArray);
+
+	// --- consumers: every usage of this declaration and what it feeds. ---
+	TSet<const UMaterialExpression*> UsageSet;
+	TArray<UMaterialExpressionNamedRerouteUsage*> Usages;
+	for (UMaterialExpression* Expression : Owner.Expressions())
+	{
+		UMaterialExpressionNamedRerouteUsage* Usage = Cast<UMaterialExpressionNamedRerouteUsage>(Expression);
+		if (Usage && Usage->Declaration == Declaration)
+		{
+			Usages.Add(Usage);
+			UsageSet.Add(Usage);
+		}
+	}
+	TMap<const UMaterialExpression*, TArray<TSharedPtr<FJsonValue>>> FeedsByUsage;
+	for (UMaterialExpression* Expression : Owner.Expressions())
+	{
+		if (!Expression)
+		{
+			continue;
+		}
+		for (int32 i = 0; Expression->GetInput(i) != nullptr; i++)
+		{
+			const UMaterialExpression* Source = Expression->GetInput(i)->Expression;
+			if (!Source || !UsageSet.Contains(Source))
+			{
+				continue;
+			}
+			TSharedRef<FJsonObject> Feed = MakeShared<FJsonObject>();
+			Feed->SetStringField(TEXT("expression_id"), GetExpressionId(Expression));
+			const FName InputName = Expression->GetInputName(i);
+			Feed->SetStringField(TEXT("input_name"), InputName.IsNone() ? FString::Printf(TEXT("Input_%d"), i) : InputName.ToString());
+			if (const UMaterialExpressionFunctionOutput* FunctionOutput = Cast<UMaterialExpressionFunctionOutput>(Expression))
+			{
+				Feed->SetStringField(TEXT("function_output"), FunctionOutput->OutputName.ToString());
+			}
+			FeedsByUsage.FindOrAdd(Source).Add(MakeShared<FJsonValueObject>(Feed));
+		}
+	}
+	if (Owner.Material)
+	{
+		for (const TPair<FString, EMaterialProperty>& Property : GetMaterialOutputProperties())
+		{
+			const FExpressionInput* PropertyInput = Owner.Material->GetExpressionInputForProperty(Property.Value);
+			if (PropertyInput && PropertyInput->Expression && UsageSet.Contains(PropertyInput->Expression))
+			{
+				TSharedRef<FJsonObject> Feed = MakeShared<FJsonObject>();
+				Feed->SetStringField(TEXT("property"), Property.Key);
+				FeedsByUsage.FindOrAdd(PropertyInput->Expression).Add(MakeShared<FJsonValueObject>(Feed));
+			}
+		}
+	}
+	TArray<TSharedPtr<FJsonValue>> ConsumersArray;
+	for (UMaterialExpressionNamedRerouteUsage* Usage : Usages)
+	{
+		TSharedRef<FJsonObject> ConsumerObj = MakeShared<FJsonObject>();
+		ConsumerObj->SetStringField(TEXT("usage_id"), GetExpressionId(Usage));
+		ConsumerObj->SetObjectField(TEXT("pos"), MakePosObject(Usage));
+		ConsumerObj->SetArrayField(TEXT("feeds"), FeedsByUsage.FindRef(Usage));
+		ConsumersArray.Add(MakeShared<FJsonValueObject>(ConsumerObj));
+	}
+	Root->SetArrayField(TEXT("consumers"), ConsumersArray);
+
+	FString OutputString;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
+	FJsonSerializer::Serialize(Root, Writer);
+	return OutputString;
 }

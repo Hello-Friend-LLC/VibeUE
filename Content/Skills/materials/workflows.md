@@ -254,5 +254,51 @@ diag = MNS.get_material_diagnostics(path)   # expect no new compile errors
   consumer of the returned value gets its own usage (used by `M_HF_UiTile`).
 - To rebuild a graph in place, delete node by node and finish with `MNS.cleanup_unused_expressions(path)`
   (`delete_all_material_expressions` leaves declarations behind, so new ones get `_1` suffixes).
-- `export_material_graph` / `export_function_graph` do not yet record usage links. Listing, renaming,
-  usage-by-name, promote-a-fan-out and a readability pass are planned (PrjEfz work item WI-1672).
+- `export_material_graph` / `export_function_graph` record each reroute node's link in `named_reroute`
+  (`role`, `name`, `guid`, `declaration_id`); see `reference.md` → Recreate from export. Promote-a-fan-out
+  and a readability pass are planned (PrjEfz work item WI-1672).
+
+### Name-keyed API (Material or MaterialFunction, by asset path)
+
+Prefer these to the object-based recipe above: they take the asset path and the variable NAME, work the same
+for a `Material` and a `MaterialFunction`, and cannot reach nodes inside functions the asset calls.
+
+```python
+mns = unreal.MaterialNodeService
+info = mns.create_named_reroute_declaration(path, "Accent", unreal.LinearColor(1, 0.5, 0, 1), -800, 0,
+                                            accent_param.get_path_name(), "")   # wire a source node (optional)
+name = info.name                       # final name: a clash became "Accent_1"
+use_id = mns.create_named_reroute_usage(path, name, -400, 0, mul.get_path_name(), "A")   # linked + wired
+lst = mns.list_named_reroutes(path)    # declarations, their usage_ids, broken_usage_ids
+final = mns.rename_named_reroute_declaration(path, name, "Highlight")   # usages stay linked and refresh
+defn = json.loads(mns.get_named_reroute_definition(path, final))        # see below
+```
+
+Node refs (`source_ref`, `target_ref`) are a session id, an object path or a bare subobject name of a node in
+THAT asset; a number or a node of a called function is refused. Failed calls change nothing and return an empty
+name / id. Python `set_editor_property("name")` does NOT refresh usage nodes: rename through
+`rename_named_reroute_declaration`.
+
+### Extract one variable and how it is generated
+
+`get_named_reroute_definition(path, name)` returns JSON: `declaration`, `nodes` + `connections` (the subgraph
+that generates the value, same node/connection shape as the full export), `inputs` (the boundary: parameters,
+constants, texture objects, function inputs, and `{usage_id, depends_on}` for OTHER variables, which are
+dependencies and never inlined) and `consumers` (each usage with its `feeds`: `{expression_id, input_name}`,
+`{property}` or `function_output`). To rebuild it elsewhere, recreate `inputs` first, then `nodes`, then wire
+`connections`, then create the declaration with the `connections` entry whose `target_id` is `declaration.id`
+as its source, then one usage per consumer.
+
+### Slice one variable out of a full export
+
+With only an export file and no live editor (prefer `get_named_reroute_definition` when you have one):
+1. Parse the `export_material_graph` / `export_function_graph` JSON; find the node with
+   `named_reroute.role == "declaration"` and the wanted `named_reroute.name`.
+2. Back-walk `connections` from that node: for each connection with `target_id` == the current node, add its
+   `source_id` node; repeat.
+3. Stop (list as inputs, do not walk past) at parameters (`is_parameter`), constants (`class` Constant,
+   Constant2Vector/3Vector/4Vector), texture objects, function inputs (`is_function_input`), and any node with
+   `named_reroute.role == "usage"` and a DIFFERENT `name` (record `depends_on: name`).
+4. Consumers: nodes with `named_reroute.role == "usage"` and the same `name`, plus every `connections` entry
+   whose `source_id` is one of them (and `output_connections` entries for materials).
+Ids in the file are session ids from the export run: only compare ids inside the one file.

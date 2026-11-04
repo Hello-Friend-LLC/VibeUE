@@ -10,6 +10,14 @@
 #include "Materials/MaterialExpressionMultiply.h"
 #include "Materials/MaterialExpressionFunctionOutput.h"
 #include "Materials/MaterialExpressionNamedReroute.h"
+#include "Materials/MaterialExpressionAdd.h"
+#include "Materials/MaterialExpressionConstant.h"
+#include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionTextureCoordinate.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include "MaterialEditingLibrary.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "UObject/Package.h"
@@ -425,6 +433,341 @@ bool FVibeNamedRerouteRenameTest::RunTest(const FString&)
 
 		TestTrue(FString::Printf(TEXT("%s: empty new name is refused"), Kind),
 			UMaterialNodeService::RenameNamedRerouteDeclaration(Graph.Path, Clash, TEXT("")).IsEmpty());
+	}
+	return true;
+}
+
+namespace
+{
+	TSharedPtr<FJsonObject> ParseJsonObject(const FString& Json)
+	{
+		TSharedPtr<FJsonObject> Object;
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
+		return FJsonSerializer::Deserialize(Reader, Object) ? Object : nullptr;
+	}
+
+	// The object in a JSON array field whose string field Key equals Value.
+	TSharedPtr<FJsonObject> FindByField(const TSharedPtr<FJsonObject>& Root, const TCHAR* ArrayField, const TCHAR* Key, const FString& Value)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Array = nullptr;
+		if (Root.IsValid() && Root->TryGetArrayField(ArrayField, Array))
+		{
+			for (const TSharedPtr<FJsonValue>& Item : *Array)
+			{
+				const TSharedPtr<FJsonObject>* Object = nullptr;
+				FString Found;
+				if (Item->TryGetObject(Object) && (*Object)->TryGetStringField(Key, Found) && Found == Value)
+				{
+					return *Object;
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	int32 ArrayNum(const TSharedPtr<FJsonObject>& Root, const TCHAR* ArrayField)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Array = nullptr;
+		return (Root.IsValid() && Root->TryGetArrayField(ArrayField, Array)) ? Array->Num() : -1;
+	}
+
+	FString Serialize(const TSharedPtr<FJsonObject>& Object)
+	{
+		FString Out;
+		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
+		FJsonSerializer::Serialize(Object.ToSharedRef(), Writer);
+		return Out;
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Export carries the named_reroute link, and the export recipe rebuilds the variable by name.
+// ---------------------------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVibeNamedRerouteExportTest,
+	"VibeUE.MaterialNodeService.NamedReroute.Export",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVibeNamedRerouteExportTest::RunTest(const FString&)
+{
+	for (const bool bFunction : {false, true})
+	{
+		const TCHAR* Kind = bFunction ? TEXT("MaterialFunction") : TEXT("Material");
+		FScratchGraph Graph(bFunction ? TEXT("MF_NamedRerouteExport") : TEXT("M_NamedRerouteExport"), bFunction);
+		FScratchGraph Copy(bFunction ? TEXT("MF_NamedRerouteExportCopy") : TEXT("M_NamedRerouteExportCopy"), bFunction);
+		if (!TestTrue(FString::Printf(TEXT("%s: scratch assets created"), Kind), Graph.IsValid() && Copy.IsValid()))
+		{
+			return false;
+		}
+
+		UMaterialExpression* Source = Graph.NewExpression(UMaterialExpressionConstant3Vector::StaticClass(), -600, 0);
+		const FVibeNamedRerouteInfo Decl = UMaterialNodeService::CreateNamedRerouteDeclaration(
+			Graph.Path, TEXT("Accent"), FLinearColor::White, -300, 40, Source->GetPathName(), TEXT(""));
+		const FString UsageA = UMaterialNodeService::CreateNamedRerouteUsage(Graph.Path, TEXT("Accent"), 0, 0, TEXT(""), TEXT(""));
+		const FString UsageB = UMaterialNodeService::CreateNamedRerouteUsage(Graph.Path, TEXT("Accent"), 0, 120, TEXT(""), TEXT(""));
+		if (!TestTrue(FString::Printf(TEXT("%s: variable built"), Kind), !Decl.Name.IsEmpty() && !UsageA.IsEmpty() && !UsageB.IsEmpty()))
+		{
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject> Export = ParseJsonObject(
+			bFunction ? UMaterialNodeService::ExportFunctionGraph(Graph.Path) : UMaterialNodeService::ExportMaterialGraph(Graph.Path));
+		if (!TestTrue(FString::Printf(TEXT("%s: export parses"), Kind), Export.IsValid()))
+		{
+			return false;
+		}
+
+		// Declaration and both usages carry named_reroute with the declaration's NAME and guid.
+		const TSharedPtr<FJsonObject> DeclNode = FindByField(Export, TEXT("expressions"), TEXT("id"), Decl.DeclarationId);
+		const TSharedPtr<FJsonObject>* DeclKey = nullptr;
+		if (!TestTrue(FString::Printf(TEXT("%s: declaration node exported with named_reroute"), Kind),
+				DeclNode.IsValid() && DeclNode->TryGetObjectField(TEXT("named_reroute"), DeclKey)))
+		{
+			return false;
+		}
+		TestEqual(FString::Printf(TEXT("%s: declaration role"), Kind), (*DeclKey)->GetStringField(TEXT("role")), FString(TEXT("declaration")));
+		TestEqual(FString::Printf(TEXT("%s: declaration name"), Kind), (*DeclKey)->GetStringField(TEXT("name")), FString(TEXT("Accent")));
+		TestEqual(FString::Printf(TEXT("%s: declaration guid"), Kind), (*DeclKey)->GetStringField(TEXT("guid")), Decl.VariableGuid);
+		for (const FString& UsageId : {UsageA, UsageB})
+		{
+			const TSharedPtr<FJsonObject> UsageNode = FindByField(Export, TEXT("expressions"), TEXT("id"), UsageId);
+			const TSharedPtr<FJsonObject>* UsageKey = nullptr;
+			if (TestTrue(FString::Printf(TEXT("%s: usage node exported with named_reroute"), Kind),
+					UsageNode.IsValid() && UsageNode->TryGetObjectField(TEXT("named_reroute"), UsageKey)))
+			{
+				TestEqual(FString::Printf(TEXT("%s: usage role"), Kind), (*UsageKey)->GetStringField(TEXT("role")), FString(TEXT("usage")));
+				TestEqual(FString::Printf(TEXT("%s: usage names its declaration"), Kind), (*UsageKey)->GetStringField(TEXT("name")), FString(TEXT("Accent")));
+				TestEqual(FString::Printf(TEXT("%s: usage declaration_id"), Kind), (*UsageKey)->GetStringField(TEXT("declaration_id")), Decl.DeclarationId);
+				TestFalse(FString::Printf(TEXT("%s: healthy usage is not flagged broken"), Kind), (*UsageKey)->HasField(TEXT("broken")));
+			}
+		}
+		// Ordinary nodes get no new key.
+		const TSharedPtr<FJsonObject> SourceNode = FindByField(Export, TEXT("expressions"), TEXT("id"), SessionId(Source));
+		TestTrue(FString::Printf(TEXT("%s: non-reroute node has no named_reroute key"), Kind), SourceNode.IsValid() && !SourceNode->HasField(TEXT("named_reroute")));
+
+		// The recreate recipe (reference.md): declarations first by name, then usages by name.
+		const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+		Export->TryGetArrayField(TEXT("expressions"), Nodes);
+		for (const TSharedPtr<FJsonValue>& Node : *Nodes)
+		{
+			const TSharedPtr<FJsonObject>* NodeObject = nullptr;
+			const TSharedPtr<FJsonObject>* Key = nullptr;
+			if (Node->TryGetObject(NodeObject) && (*NodeObject)->TryGetObjectField(TEXT("named_reroute"), Key) &&
+				(*Key)->GetStringField(TEXT("role")) == TEXT("declaration"))
+			{
+				const FVibeNamedRerouteInfo Made = UMaterialNodeService::CreateNamedRerouteDeclaration(
+					Copy.Path, (*Key)->GetStringField(TEXT("name")), FLinearColor::White,
+					(*NodeObject)->GetIntegerField(TEXT("pos_x")), (*NodeObject)->GetIntegerField(TEXT("pos_y")), TEXT(""), TEXT(""));
+				TestEqual(FString::Printf(TEXT("%s: recreated declaration keeps its exported name"), Kind), Made.Name, (*Key)->GetStringField(TEXT("name")));
+			}
+		}
+		for (const TSharedPtr<FJsonValue>& Node : *Nodes)
+		{
+			const TSharedPtr<FJsonObject>* NodeObject = nullptr;
+			const TSharedPtr<FJsonObject>* Key = nullptr;
+			if (Node->TryGetObject(NodeObject) && (*NodeObject)->TryGetObjectField(TEXT("named_reroute"), Key) &&
+				(*Key)->GetStringField(TEXT("role")) == TEXT("usage"))
+			{
+				TestFalse(FString::Printf(TEXT("%s: recreated usage by name"), Kind),
+					UMaterialNodeService::CreateNamedRerouteUsage(Copy.Path, (*Key)->GetStringField(TEXT("name")),
+						(*NodeObject)->GetIntegerField(TEXT("pos_x")), (*NodeObject)->GetIntegerField(TEXT("pos_y")), TEXT(""), TEXT("")).IsEmpty());
+			}
+		}
+		const FVibeNamedRerouteList Original = UMaterialNodeService::ListNamedReroutes(Graph.Path);
+		const FVibeNamedRerouteList Rebuilt = UMaterialNodeService::ListNamedReroutes(Copy.Path);
+		if (TestEqual(FString::Printf(TEXT("%s: rebuilt graph has the same declarations"), Kind), Rebuilt.Declarations.Num(), Original.Declarations.Num()) &&
+			Rebuilt.Declarations.Num() == 1)
+		{
+			TestEqual(FString::Printf(TEXT("%s: rebuilt name matches"), Kind), Rebuilt.Declarations[0].Name, Original.Declarations[0].Name);
+			TestEqual(FString::Printf(TEXT("%s: rebuilt usage count matches"), Kind), Rebuilt.Declarations[0].UsageIds.Num(), Original.Declarations[0].UsageIds.Num());
+			TestNotEqual(FString::Printf(TEXT("%s: rebuilt guid is the new graph's own"), Kind), Rebuilt.Declarations[0].VariableGuid, Original.Declarations[0].VariableGuid);
+		}
+
+		// A usage whose declaration is gone is flagged, with an empty name.
+		const TArray<UMaterialExpressionNamedRerouteUsage*> Usages = Graph.All<UMaterialExpressionNamedRerouteUsage>();
+		if (TestTrue(FString::Printf(TEXT("%s: usages present"), Kind), Usages.Num() == 2))
+		{
+			Usages[0]->Declaration = nullptr;
+			const TSharedPtr<FJsonObject> Broken = ParseJsonObject(
+				bFunction ? UMaterialNodeService::ExportFunctionGraph(Graph.Path) : UMaterialNodeService::ExportMaterialGraph(Graph.Path));
+			const TSharedPtr<FJsonObject> BrokenNode = FindByField(Broken, TEXT("expressions"), TEXT("id"), SessionId(Usages[0]));
+			const TSharedPtr<FJsonObject>* BrokenKey = nullptr;
+			if (TestTrue(FString::Printf(TEXT("%s: broken usage still exported"), Kind),
+					BrokenNode.IsValid() && BrokenNode->TryGetObjectField(TEXT("named_reroute"), BrokenKey)))
+			{
+				TestTrue(FString::Printf(TEXT("%s: broken usage flagged"), Kind), (*BrokenKey)->GetBoolField(TEXT("broken")));
+				TestEqual(FString::Printf(TEXT("%s: broken usage has an empty name"), Kind), (*BrokenKey)->GetStringField(TEXT("name")), FString());
+			}
+		}
+
+		// The other readers of a material graph still work with reroute nodes present.
+		if (!bFunction)
+		{
+			TestNotNull(TEXT("summary export parses"), ParseJsonObject(UMaterialNodeService::ExportMaterialGraphSummary(Graph.Path)).Get());
+			TestNotNull(TEXT("compare parses"), ParseJsonObject(UMaterialNodeService::CompareMaterialGraphs(Graph.Path, Copy.Path)).Get());
+		}
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// get_named_reroute_definition: the generating subgraph, its boundary and its consumers.
+//   Base = Add(Constant, TexCoord);  Tint = Multiply(ScalarParam "Strength", Usage(Base))
+//   Tint is consumed twice (output / BaseColor, and Multiply2.A).
+// ---------------------------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVibeNamedRerouteDefinitionTest,
+	"VibeUE.MaterialNodeService.NamedReroute.Definition",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVibeNamedRerouteDefinitionTest::RunTest(const FString&)
+{
+	AddExpectedError(TEXT("no named reroute declaration called"), EAutomationExpectedErrorFlags::Contains, 0);
+	for (const bool bFunction : {false, true})
+	{
+		const TCHAR* Kind = bFunction ? TEXT("MaterialFunction") : TEXT("Material");
+		FScratchGraph Graph(bFunction ? TEXT("MF_NamedRerouteDefinition") : TEXT("M_NamedRerouteDefinition"), bFunction);
+		if (!TestTrue(FString::Printf(TEXT("%s: scratch asset created"), Kind), Graph.IsValid()))
+		{
+			return false;
+		}
+
+		UMaterialExpression* Constant = Graph.NewExpression(UMaterialExpressionConstant::StaticClass(), -900, 0);
+		UMaterialExpression* TexCoord = Graph.NewExpression(UMaterialExpressionTextureCoordinate::StaticClass(), -900, 100);
+		UMaterialExpressionAdd* Add = Cast<UMaterialExpressionAdd>(Graph.NewExpression(UMaterialExpressionAdd::StaticClass(), -700, 0));
+		UMaterialExpressionScalarParameter* Param = Cast<UMaterialExpressionScalarParameter>(Graph.NewExpression(UMaterialExpressionScalarParameter::StaticClass(), -700, 200));
+		UMaterialExpressionMultiply* Multiply = Cast<UMaterialExpressionMultiply>(Graph.NewExpression(UMaterialExpressionMultiply::StaticClass(), -300, 0));
+		UMaterialExpressionMultiply* Multiply2 = Cast<UMaterialExpressionMultiply>(Graph.NewExpression(UMaterialExpressionMultiply::StaticClass(), 300, 200));
+		if (!TestTrue(FString::Printf(TEXT("%s: nodes created"), Kind), Constant && TexCoord && Add && Param && Multiply && Multiply2))
+		{
+			return false;
+		}
+		Param->ParameterName = TEXT("Strength");
+		Add->A.Connect(0, Constant);
+		Add->B.Connect(0, TexCoord);
+		Multiply->A.Connect(0, Param);
+
+		UMaterialNodeService::CreateNamedRerouteDeclaration(Graph.Path, TEXT("Base"), FLinearColor::White, -500, 0, Add->GetPathName(), TEXT(""));
+		const FString BaseUsage = UMaterialNodeService::CreateNamedRerouteUsage(Graph.Path, TEXT("Base"), -500, 100, Multiply->GetPathName(), TEXT("B"));
+		const FVibeNamedRerouteInfo Tint = UMaterialNodeService::CreateNamedRerouteDeclaration(
+			Graph.Path, TEXT("Tint"), FLinearColor::White, -100, 0, Multiply->GetPathName(), TEXT(""));
+		const FString TintUsageA = UMaterialNodeService::CreateNamedRerouteUsage(Graph.Path, TEXT("Tint"), 100, 0, TEXT(""), TEXT(""));
+		const FString TintUsageB = UMaterialNodeService::CreateNamedRerouteUsage(Graph.Path, TEXT("Tint"), 100, 200, Multiply2->GetPathName(), TEXT("A"));
+		if (!TestTrue(FString::Printf(TEXT("%s: variables built"), Kind), !BaseUsage.IsEmpty() && !Tint.Name.IsEmpty() && !TintUsageA.IsEmpty() && !TintUsageB.IsEmpty()))
+		{
+			return false;
+		}
+		if (bFunction)
+		{
+			UMaterialExpressionFunctionOutput* Output = Cast<UMaterialExpressionFunctionOutput>(Graph.NewExpression(UMaterialExpressionFunctionOutput::StaticClass(), 500, 0));
+			UMaterialExpressionNamedRerouteUsage* UsageNode = nullptr;
+			for (UMaterialExpressionNamedRerouteUsage* Candidate : Graph.All<UMaterialExpressionNamedRerouteUsage>())
+			{
+				if (SessionId(Candidate) == TintUsageA)
+				{
+					UsageNode = Candidate;
+				}
+			}
+			if (!TestTrue(TEXT("MaterialFunction: output wired from the first Tint usage"), Output && UsageNode))
+			{
+				return false;
+			}
+			Output->A.Connect(0, UsageNode);
+		}
+		else
+		{
+			TestTrue(TEXT("Material: Tint usage -> BaseColor"), UMaterialNodeService::ConnectExpressionToOutput(Graph.Path, TintUsageA, TEXT(""), TEXT("BaseColor")));
+		}
+
+		// --- Tint: Multiply + its parameter + the Base usage, nothing of Base's own generation. ---
+		const TSharedPtr<FJsonObject> Def = ParseJsonObject(UMaterialNodeService::GetNamedRerouteDefinition(Graph.Path, TEXT("Tint")));
+		if (!TestTrue(FString::Printf(TEXT("%s: Tint definition parses"), Kind), Def.IsValid()))
+		{
+			return false;
+		}
+		const TSharedPtr<FJsonObject>* DeclObj = nullptr;
+		if (TestTrue(FString::Printf(TEXT("%s: declaration block"), Kind), Def->TryGetObjectField(TEXT("declaration"), DeclObj)))
+		{
+			TestEqual(FString::Printf(TEXT("%s: declaration name"), Kind), (*DeclObj)->GetStringField(TEXT("name")), FString(TEXT("Tint")));
+			TestEqual(FString::Printf(TEXT("%s: declaration variable_guid"), Kind), (*DeclObj)->GetStringField(TEXT("variable_guid")), Tint.VariableGuid);
+		}
+		TestEqual(FString::Printf(TEXT("%s: Tint nodes = Multiply + Strength + Base usage"), Kind), ArrayNum(Def, TEXT("nodes")), 3);
+		for (UMaterialExpression* Inlined : {static_cast<UMaterialExpression*>(Add), Constant, TexCoord})
+		{
+			TestFalse(FString::Printf(TEXT("%s: Base's own node %s is not inlined"), Kind, *Inlined->GetClass()->GetName()),
+				FindByField(Def, TEXT("nodes"), TEXT("id"), SessionId(Inlined)).IsValid());
+		}
+		TestTrue(FString::Printf(TEXT("%s: Multiply is in the definition"), Kind), FindByField(Def, TEXT("nodes"), TEXT("id"), SessionId(Multiply)).IsValid());
+		TestEqual(FString::Printf(TEXT("%s: two boundary inputs"), Kind), ArrayNum(Def, TEXT("inputs")), 2);
+		const TSharedPtr<FJsonObject> ParamInput = FindByField(Def, TEXT("inputs"), TEXT("expression_id"), SessionId(Param));
+		TestTrue(FString::Printf(TEXT("%s: the parameter is listed as an input by name"), Kind),
+			ParamInput.IsValid() && ParamInput->GetStringField(TEXT("kind")) == TEXT("parameter") && ParamInput->GetStringField(TEXT("name")) == TEXT("Strength"));
+		const TSharedPtr<FJsonObject> UsageInput = FindByField(Def, TEXT("inputs"), TEXT("usage_id"), BaseUsage);
+		TestTrue(FString::Printf(TEXT("%s: the Base usage is a dependency, not inlined"), Kind),
+			UsageInput.IsValid() && UsageInput->GetStringField(TEXT("depends_on")) == TEXT("Base"));
+		// Param->Multiply, BaseUsage->Multiply, Multiply->declaration.
+		TestEqual(FString::Printf(TEXT("%s: three connections"), Kind), ArrayNum(Def, TEXT("connections")), 3);
+		TestTrue(FString::Printf(TEXT("%s: the wire into the declaration is included"), Kind),
+			FindByField(Def, TEXT("connections"), TEXT("target_id"), Tint.DeclarationId).IsValid());
+
+		// Same node shape as the full export, by construction.
+		const TSharedPtr<FJsonObject> Export = ParseJsonObject(
+			bFunction ? UMaterialNodeService::ExportFunctionGraph(Graph.Path) : UMaterialNodeService::ExportMaterialGraph(Graph.Path));
+		const TSharedPtr<FJsonObject> InDef = FindByField(Def, TEXT("nodes"), TEXT("id"), SessionId(Multiply));
+		const TSharedPtr<FJsonObject> InExport = FindByField(Export, TEXT("expressions"), TEXT("id"), SessionId(Multiply));
+		TestTrue(FString::Printf(TEXT("%s: definition node is byte-identical to the export node"), Kind),
+			InDef.IsValid() && InExport.IsValid() && Serialize(InDef) == Serialize(InExport));
+		const TSharedPtr<FJsonObject> UsageInDef = FindByField(Def, TEXT("nodes"), TEXT("id"), BaseUsage);
+		const TSharedPtr<FJsonObject>* UsageKey = nullptr;
+		TestTrue(FString::Printf(TEXT("%s: usage node in the definition carries named_reroute"), Kind),
+			UsageInDef.IsValid() && UsageInDef->TryGetObjectField(TEXT("named_reroute"), UsageKey) && (*UsageKey)->GetStringField(TEXT("name")) == TEXT("Base"));
+
+		// --- consumers ---
+		TestEqual(FString::Printf(TEXT("%s: two Tint consumers"), Kind), ArrayNum(Def, TEXT("consumers")), 2);
+		const TSharedPtr<FJsonObject> ConsumerA = FindByField(Def, TEXT("consumers"), TEXT("usage_id"), TintUsageA);
+		const TSharedPtr<FJsonObject> ConsumerB = FindByField(Def, TEXT("consumers"), TEXT("usage_id"), TintUsageB);
+		if (TestTrue(FString::Printf(TEXT("%s: both usages listed as consumers"), Kind), ConsumerA.IsValid() && ConsumerB.IsValid()))
+		{
+			TestEqual(FString::Printf(TEXT("%s: usage A feeds one place"), Kind), ArrayNum(ConsumerA, TEXT("feeds")), 1);
+			TSharedPtr<FJsonObject> Feed;
+			const TArray<TSharedPtr<FJsonValue>>* FeedsB = nullptr;
+			if (ConsumerB->TryGetArrayField(TEXT("feeds"), FeedsB) && FeedsB->Num() == 1)
+			{
+				const TSharedPtr<FJsonObject>* FeedObject = nullptr;
+				if ((*FeedsB)[0]->TryGetObject(FeedObject))
+				{
+					TestEqual(FString::Printf(TEXT("%s: usage B feeds Multiply2"), Kind), (*FeedObject)->GetStringField(TEXT("expression_id")), SessionId(Multiply2));
+					TestEqual(FString::Printf(TEXT("%s: usage B feeds input A"), Kind), (*FeedObject)->GetStringField(TEXT("input_name")), FString(TEXT("A")));
+				}
+			}
+			else
+			{
+				AddError(FString::Printf(TEXT("%s: usage B should feed exactly one input"), Kind));
+			}
+			const TArray<TSharedPtr<FJsonValue>>* FeedsA = nullptr;
+			const TSharedPtr<FJsonObject>* FeedA = nullptr;
+			if (ConsumerA->TryGetArrayField(TEXT("feeds"), FeedsA) && FeedsA->Num() == 1 && (*FeedsA)[0]->TryGetObject(FeedA))
+			{
+				if (bFunction)
+				{
+					TestTrue(TEXT("MaterialFunction: usage A feeds a function output"), (*FeedA)->HasField(TEXT("function_output")));
+				}
+				else
+				{
+					TestEqual(TEXT("Material: usage A feeds BaseColor"), (*FeedA)->GetStringField(TEXT("property")), FString(TEXT("BaseColor")));
+				}
+			}
+		}
+
+		// --- Base: the other side of the boundary. Constant + TexCoord + Add, one constant input, one consumer. ---
+		const TSharedPtr<FJsonObject> BaseDef = ParseJsonObject(UMaterialNodeService::GetNamedRerouteDefinition(Graph.Path, TEXT("Base")));
+		TestEqual(FString::Printf(TEXT("%s: Base nodes = Add + Constant + TexCoord"), Kind), ArrayNum(BaseDef, TEXT("nodes")), 3);
+		TestEqual(FString::Printf(TEXT("%s: Base has one boundary input (the constant)"), Kind), ArrayNum(BaseDef, TEXT("inputs")), 1);
+		const TSharedPtr<FJsonObject> ConstantInput = FindByField(BaseDef, TEXT("inputs"), TEXT("expression_id"), SessionId(Constant));
+		TestTrue(FString::Printf(TEXT("%s: the constant is the input"), Kind), ConstantInput.IsValid() && ConstantInput->GetStringField(TEXT("kind")) == TEXT("constant"));
+		TestEqual(FString::Printf(TEXT("%s: Base has one consumer"), Kind), ArrayNum(BaseDef, TEXT("consumers")), 1);
+
+		// --- failures ---
+		TestTrue(FString::Printf(TEXT("%s: unknown name gives an empty definition"), Kind),
+			UMaterialNodeService::GetNamedRerouteDefinition(Graph.Path, TEXT("NoSuchVariable")).IsEmpty());
 	}
 	return true;
 }

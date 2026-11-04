@@ -47,6 +47,10 @@ ignores spaces on the property *name* (display or internal); read legal values f
 - **expression**: `id`, `class` (e.g. `"Multiply"`), `class_full`, `pos_x`/`pos_y` (NOT x/y),
   `properties` (dict, excludes ParameterName/Group), `inputs`, `outputs`, `is_parameter`,
   `parameter_name`, `group`, `function_path`, `hlsl_code`, `custom_input_names`, `landscape_layers`.
+  Named reroute declaration / usage nodes also carry `named_reroute`:
+  `{role: "declaration"|"usage", name, guid, declaration_id}` (a usage whose declaration is gone adds
+  `broken: true` with an empty `name`). `name` and `guid` are persistent; `declaration_id` is a session id.
+  `export_function_graph` uses the same keys. `get_named_reroute_definition` emits nodes/connections in this shape.
 - **connection**: `source_id`, `source_output_index`, `source_output_name` ("" = default),
   `target_id`, `target_input` (NOT `target_input_name`).
 - **output_connection**: `property` (e.g. `"BaseColor"`), `expression_id`, `output_index`,
@@ -67,6 +71,17 @@ Property gotchas: `MaterialExpressionTypeInfo` uses `display_name` (not `name`);
 5. Set `ParameterName`/`Group` FIRST via `set_expression_property` (they're excluded from batch props).
 6. `batch_set_properties` for the rest.
 7. `batch_connect_expressions` using the `connections` array (mapped ids).
+   **Named reroutes:** a node whose export has `named_reroute` is NOT created in step 4. Do instead, in this
+   order, before step 7: (a) for each `role: "declaration"` node
+   `create_named_reroute_declaration(path, named_reroute.name, color, pos_x, pos_y, source_ref, source_output_name)`
+   (the final name is returned and can differ with a `_N` suffix on a clash: key the usages by that returned name);
+   (b) for each `role: "usage"` node `create_named_reroute_usage(path, named_reroute.name, pos_x, pos_y, target_ref, target_input_name)`
+   passing the already-recreated consumer (from the `connections` entry whose `source_id` is the usage) as
+   target, and keep old-id -> new-id for the usage; (c) the declaration's own input wire (the `connections` entry whose
+   `target_id` is the declaration) is `source_ref` in (a), so recreate its source node first. Skip those
+   entries in `batch_connect_expressions`. A usage with `broken: true` has no declaration to name: recreate it
+   as a plain node or drop it. `id` values (including `named_reroute.declaration_id`) are session ids and never survive
+   a reload; the declaration `name` and `guid` are the persistent keys, and a recreated declaration gets a new guid.
 8. `connect_expression_to_output(path, expr_id, output_name, property)` for each `output_connections`
    entry — `property` takes the friendly name (`"BaseColor"`) or the `MP_` spelling; `output_name=""`
    is output 0. (Interchangeable with the engine `MaterialTools.connect_to_output` `call_tool`.)

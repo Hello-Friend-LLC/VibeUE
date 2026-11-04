@@ -382,6 +382,7 @@ struct FVibeMaterialGraphOwner
 };
 
 class UMaterialExpressionNamedRerouteDeclaration;
+class FJsonObject;
 
 /**
  * Material Node Service - Python API for material graph manipulation
@@ -443,6 +444,7 @@ class UMaterialExpressionNamedRerouteDeclaration;
  * - create_named_reroute_usage: Create a usage linked to a declaration by name (optionally wired into a node input)
  * - rename_named_reroute_declaration: Rename a declaration; usages stay linked and refresh
  * - link_named_reroute_usage: Link an existing usage node to an existing declaration node
+ * - get_named_reroute_definition: One variable as JSON: its declaration, the subgraph that generates it, its inputs and consumers
  *
  * Material Outputs:
  * - get_output_properties: Get available material output pins
@@ -1363,6 +1365,30 @@ public:
 		const FString& NewName);
 
 	/**
+	 * Extract one named-reroute variable and how it is generated, as JSON (read-only).
+	 *
+	 * Walks back from the declaration's input through every connected input, inside this asset only, and
+	 * returns: "declaration" {id, name, node_color, variable_guid, pos}; "nodes" + "connections" (the
+	 * generating subgraph, in the same node/connection shape as export_material_graph / export_function_graph,
+	 * plus the wire into the declaration); "inputs" (the walk boundary, listed and not walked past:
+	 * parameters, constants, texture objects, function inputs, and usages of OTHER named reroutes as
+	 * {usage_id, depends_on} - nested variables are dependencies, never inlined); and "consumers" (each
+	 * usage of this variable with the node inputs / material properties / function outputs it feeds).
+	 * Ids are session ids; names and variable_guid are the durable keys.
+	 *
+	 * @param AssetPath       Full asset path to a UMaterial or UMaterialFunction
+	 * @param DeclarationName Exact declaration name
+	 * @return JSON string; empty (with a warning) for an unknown or ambiguous name
+	 *
+	 * Example:
+	 *   import json
+	 *   d = json.loads(unreal.MaterialNodeService.get_named_reroute_definition("/Game/M_Test", "Tint"))
+	 *   print(len(d["nodes"]), [i.get("name") or i.get("depends_on") for i in d["inputs"]])
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "MaterialNode")
+	static FString GetNamedRerouteDefinition(const FString& AssetPath, const FString& DeclarationName);
+
+	/**
 	 * The single source of truth for the material outputs this service understands, as ordered
 	 * (friendly name -> EMaterialProperty) pairs. Both the writers (StringToMaterialProperty, behind
 	 * connect_expression_to_output / disconnect_output) and the reader (GetOutputConnections) are
@@ -1405,4 +1431,10 @@ private:
 	/** Recompile / refresh the graph after a mutation. Never saves. */
 	static void RefreshOwner(const FVibeMaterialGraphOwner& Owner);
 	static FVibeNamedRerouteInfo BuildNamedRerouteInfo(const FVibeMaterialGraphOwner& Owner, UMaterialExpressionNamedRerouteDeclaration* Declaration);
+
+	// Shared JSON builders behind export_material_graph, export_function_graph and get_named_reroute_definition.
+	/** One node object (adds the "named_reroute" key on reroute declaration / usage nodes). */
+	static TSharedPtr<FJsonObject> ExportExpressionNode(UMaterialExpression* Expression, bool bFunctionGraph);
+	/** One connection object for Expression's input InputIndex; null when that input is unconnected. */
+	static TSharedPtr<FJsonObject> ExportConnection(UMaterialExpression* Expression, int32 InputIndex, bool bFunctionGraph);
 };
