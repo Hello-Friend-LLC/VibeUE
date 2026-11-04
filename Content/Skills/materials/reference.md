@@ -12,6 +12,7 @@ description: Material reference — parameter types, material output names, enum
 - Enum value format
 - Export JSON schema
 - Recreate a material from export
+- Named reroute calls
 - Material Functions
 
 ## Two services
@@ -89,6 +90,27 @@ Property gotchas: `MaterialExpressionTypeInfo` uses `display_name` (not `name`);
 9. `compile_material`.
 
 Runnable: `scripts/export_graph.txt` (export side).
+
+## Named reroute calls (Material or MaterialFunction, by `asset_path`; declarations by NAME)
+
+| Call | Returns |
+|------|---------|
+| `list_named_reroutes(path)` | `declarations` (`name`, `variable_guid`, `usage_ids`, ...) + `broken_usage_ids` |
+| `create_named_reroute_declaration(path, name, color, x, y, source_ref, source_output)` | info; `name` is final (`_N` on a clash); empty = failed |
+| `create_named_reroute_usage(path, name, x, y, target_ref, target_input)` | usage id ("" = failed); `target_ref` optional |
+| `rename_named_reroute_declaration(path, name, new_name)` | final name; usages refresh |
+| `link_named_reroute_usage(usage_expr, decl_expr)` | bool; object-level link of nodes you already hold |
+| `get_named_reroute_definition(path, name)` | JSON below |
+| `promote_to_named_reroute(path, source_ref, output, name)` | info with `usage_ids`; empty name = nothing changed |
+| `apply_reroute_readability_pass(path, dry_run=True, min_fanout=3, min_wire_length=1500)` | rows `source_id`, `source_output_name`, `fanout`, `max_wire_length`, `suggested_name`, `applied`, `applied_name` |
+
+Node refs are a session id, an `object_path` or a bare subobject name of a node in that asset. Refs of
+another asset's nodes (or of a called function) are refused.
+
+`get_named_reroute_definition` JSON: `declaration` (`id`, `name`, `variable_guid`, `node_color`, `pos`),
+`nodes` and `connections` (the generating subgraph, export node/connection shape), `inputs` (boundary
+nodes: `expression_id`, `kind`, `class_full`, `name`; another variable is `{usage_id, kind, depends_on}`),
+`consumers` (`usage_id`, `pos`, `feeds`: `{expression_id, input_name}` | `{property}` | `function_output`).
 
 ## Material Functions
 

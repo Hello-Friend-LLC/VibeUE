@@ -214,7 +214,8 @@ Runnable: `scripts/material_graph_batch.txt`.
 
 Treat a Named Reroute Declaration as a graph variable: any value that feeds more than one node, or
 would be wired across the graph, is declared once with a meaningful name and read through one Usage
-per consumer (rule in `SKILL.md` → Critical Rules). Python creates and names the declaration;
+per consumer (rule in `SKILL.md` → Critical Rules). Start with "Name-keyed API" below; the object-based
+recipe here is for when you already hold expression objects. Python creates and names the declaration;
 `MaterialNodeService.link_named_reroute_usage` links each usage, since the link fields are not
 Blueprint-visible.
 
@@ -255,8 +256,7 @@ diag = MNS.get_material_diagnostics(path)   # expect no new compile errors
 - To rebuild a graph in place, delete node by node and finish with `MNS.cleanup_unused_expressions(path)`
   (`delete_all_material_expressions` leaves declarations behind, so new ones get `_1` suffixes).
 - `export_material_graph` / `export_function_graph` record each reroute node's link in `named_reroute`
-  (`role`, `name`, `guid`, `declaration_id`); see `reference.md` → Recreate from export. Promote-a-fan-out
-  and a readability pass are planned (PrjEfz work item WI-1672).
+  (`role`, `name`, `guid`, `declaration_id`); see `reference.md` → Recreate from export.
 
 ### Name-keyed API (Material or MaterialFunction, by asset path)
 
@@ -278,6 +278,25 @@ Node refs (`source_ref`, `target_ref`) are a session id, an object path or a bar
 THAT asset; a number or a node of a called function is refused. Failed calls change nothing and return an empty
 name / id. Python `set_editor_property("name")` does NOT refresh usage nodes: rename through
 `rename_named_reroute_declaration`.
+
+### Promote a fan-out, then run the readability pass
+
+```python
+# one output with several consumers -> 1 declaration + N usages; compiled result unchanged
+info = mns.promote_to_named_reroute(path, mul.get_path_name(), "", "Tint")   # source_ref, output "" = first, requested name
+print(info.name, len(info.usage_ids))      # empty name = nothing changed (unknown source, no consumer to rewire)
+
+# whole asset: DRY RUN first (default) - it only lists candidates
+rows = mns.apply_reroute_readability_pass(path)                  # min_fanout=3, min_wire_length=1500
+for r in rows: print(r.suggested_name, r.fanout, round(r.max_wire_length))
+rows = mns.apply_reroute_readability_pass(path, False)           # apply; r.applied / r.applied_name per row
+unreal.MaterialEditingLibrary.recompile_material(unreal.load_asset(path))   # then get_material_diagnostics(path)
+```
+
+A consumer whose component mask differs from the output's is skipped (stays wired to the source); a Reroute
+knot source is converted (declaration takes the knot's input, the knot is deleted). Both calls are one undo
+transaction and never save. Read the dry-run rows before applying: long single-consumer wires qualify via
+`min_wire_length`, so raise it if you only want fan-outs.
 
 ### Extract one variable and how it is generated
 

@@ -425,57 +425,61 @@ class FJsonObject;
 /**
  * Material Node Service - Python API for material graph manipulation
  *
- * Provides 37 material node management actions:
- * 
+ * Provides 44 material node management actions. Single-node create / delete / move and auto layout
+ * are NOT in this service (use batch_create_expressions / create_parameter here, or MaterialEditingLibrary):
+ *
  * Discovery:
  * - discover_types: Find available material expression types
  * - get_categories: Get expression categories
- * 
- * Lifecycle:
- * - create: Create a new material expression
- * - delete: Delete an expression
- * - move: Move expression to new position
- * 
+ *
  * Specialized Creation:
  * - create_function_call: Create a MaterialFunctionCall node referencing a function asset
  * - create_custom_expression: Create a Custom HLSL expression node
  * - create_collection_parameter: Create a CollectionParameter referencing a parameter collection
- * 
+ *
  * Information:
- * - list: List all expressions in material
- * - get_details: Get detailed expression info
- * - get_pins: Get expression pin information
- * 
+ * - list_expressions: List all expressions in material
+ * - get_expression_details: Get detailed expression info
+ * - get_expression_pins: Get expression pin information
+ * - get_material_diagnostics: Compile status, errors and the textures the shader actually references
+ *
  * Connections:
  * - list_connections: List all connections
  * - batch_connect_expressions: Connect multiple expression pairs (expression-to-expression)
  * - connect_expression_to_output: Connect an expression output to a material output (BaseColor, Normal, ...)
  * - disconnect_output: Clear a material output's input
- * 
+ * - cleanup_unused_expressions: Delete expressions unreachable from any output (Material or MaterialFunction); returns the count
+ *
  * Properties:
- * - get_property: Get expression property value
- * - set_property: Set expression property value
- * - list_properties: List all expression properties
- * 
+ * - get_expression_property: Get expression property value
+ * - set_expression_property: Set expression property value
+ * - list_expression_properties: List all expression properties
+ *
  * Parameters:
  * - create_parameter: Create parameter expression (Scalar, Vector, Texture, TextureObject, StaticBool, StaticSwitch)
  * - promote_to_parameter: Promote constant to parameter
  * - set_parameter_metadata: Set parameter group/priority
- * 
+ *
  * Batch Operations:
- * - batch_create: Create multiple expressions in one call
- * - batch_connect: Connect multiple expression pairs in one call
+ * - batch_create_expressions: Create multiple expressions in one call
  * - batch_set_properties: Set properties on multiple expressions in one call
  * - batch_create_specialized: Create all expression types (including function calls, custom HLSL, collection params) in one call
- * 
+ *
  * Export:
- * - export_graph: Export complete material graph as JSON for recreation
- * - export_graph_summary: Export lightweight summary (counts, types) without full property data
- * - compare_graphs: Compare two material graphs and report differences
- * 
- * Layout:
- * - layout_expressions: Auto-arrange all nodes in a clean left-to-right flow
- * 
+ * - export_material_graph: Export complete material graph as JSON for recreation
+ * - export_material_graph_summary: Export lightweight summary (counts, types) without full property data
+ * - export_function_graph: Export a material function's graph as JSON
+ * - compare_material_graphs: Compare two material graphs and report differences
+ *
+ * Material Functions:
+ * - create_material_function: Create a material function asset
+ * - get_function_info: Inputs / outputs of a material function
+ * - add_function_input: Add a FunctionInput to a material function
+ * - add_function_output: Add a FunctionOutput to a material function
+ * - create_function_expression: Create an expression inside a material function
+ * - set_function_expression_property: Set a property on an expression inside a material function
+ * - connect_function_expressions: Connect two expressions inside a material function
+ *
  * Named reroutes (graph variables; Material or MaterialFunction, addressed by AssetPath):
  * - list_named_reroutes: Every declaration with its linked usages, plus broken usages
  * - create_named_reroute_declaration: Create a declaration (optionally wired from a source node)

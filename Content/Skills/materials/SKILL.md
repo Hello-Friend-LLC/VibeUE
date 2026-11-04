@@ -95,24 +95,23 @@ capture, `attach_image(...)` the returned file to inspect it.
 When a value feeds several nodes, or would be wired across the graph, declare it once as a
 **Named Reroute Declaration** with a meaningful name (`Accent`, `TileUV`, `EdgeMask`) and read it
 through **Named Reroute Usages** placed next to each consumer. Never leave long, crossing or fanned-out
-wires; when you edit an existing graph, convert the fan-outs and long wires you touch. Python can
-create and name a declaration, but it cannot link a usage itself (`Declaration` / `DeclarationGuid` are
-not Blueprint-visible), so link each usage with `MaterialNodeService.link_named_reroute_usage`:
+wires; when you edit an existing graph, convert the fan-outs and long wires you touch. Use the
+name-keyed `MaterialNodeService` calls (Material or MaterialFunction, by asset path; the variable NAME
+is the persistent key, expression `id`s are session ids that never survive a reload, so across MCP calls
+pass the declaration name or an `object_path`):
 
 ```python
-MEL = unreal.MaterialEditingLibrary
-decl = MEL.create_material_expression(mat, unreal.MaterialExpressionNamedRerouteDeclaration, -600, 0)
-decl.set_editor_property("name", "Accent")       # a clash gets a _N suffix; read the name back
-MEL.connect_material_expressions(accent_param, "", decl, "")
-use = MEL.create_material_expression(mat, unreal.MaterialExpressionNamedRerouteUsage, -200, 0)
-assert unreal.MaterialNodeService.link_named_reroute_usage(use, decl)
-MEL.connect_material_expressions(use, "", multiply, "A")   # one usage per consumer
+mns = unreal.MaterialNodeService
+info = mns.create_named_reroute_declaration(path, "Accent", unreal.LinearColor(1, 0.5, 0, 1), -800, 0, src.get_path_name(), "")
+mns.create_named_reroute_usage(path, info.name, -400, 0, mul.get_path_name(), "A")   # one per consumer; info.name may carry _N
+mns.list_named_reroutes(path); mns.rename_named_reroute_declaration(path, info.name, "Highlight")
+mns.promote_to_named_reroute(path, node.get_path_name(), "", "Tint")     # existing fan-out -> 1 declaration + N usages
+mns.apply_reroute_readability_pass(path)                                  # dry run: lists candidates; pass False to apply
 ```
 
-For a material function, use `create_material_expression_in_function`. Neither `export_material_graph`
-nor `export_function_graph` records a usage's link yet, so a graph recreated from an export loses its
-reroutes. Listing, renaming, usage-by-name, promote-a-fan-out and a readability pass are planned
-(PrjEfz work item WI-1672). Full workflow: `workflows.md` → Named reroutes.
+`export_material_graph` / `export_function_graph` record each reroute node's link as `named_reroute`;
+`get_named_reroute_definition` returns one variable's generating subgraph. Do not rename through
+`set_editor_property("name")` (usages are not refreshed). Full workflow: `workflows.md` → Named reroutes.
 
 ### 🚨 Tiling on Basic Shapes: Prefer a Child MI with `Tiling` Override
 
