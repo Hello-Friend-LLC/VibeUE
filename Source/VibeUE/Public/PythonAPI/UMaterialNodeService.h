@@ -367,6 +367,44 @@ struct FVibeNamedRerouteList
 };
 
 /**
+ * One result row of apply_reroute_readability_pass: a node OUTPUT that is a good named-reroute candidate
+ * (high fanout or a long wire), and, when the pass was applied, the variable it became.
+ */
+USTRUCT(BlueprintType)
+struct FVibeRerouteCandidate
+{
+	GENERATED_BODY()
+
+	/** Session id of the source expression (not durable across a reload). */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	FString SourceId;
+
+	/** Output pin of the source ("Output_0" style for an unnamed output). */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	FString SourceOutputName;
+
+	/** Consumer inputs promote would rewire (node inputs plus material properties reading this output). */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	int32 Fanout = 0;
+
+	/** Longest source-to-consumer distance in graph units (node editor positions). */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	float MaxWireLength = 0.f;
+
+	/** Parameter name for a parameter source, else "<ClassShortName>_<OutputName>". */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	FString SuggestedName;
+
+	/** True when the (non-dry-run) pass promoted this candidate. */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	bool bApplied = false;
+
+	/** Final declaration name after MakeNameUnique (empty unless applied). */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	FString AppliedName;
+};
+
+/**
  * The graph a named-reroute call operates on: exactly one of Material / Function is set. Plain C++
  * (not reflected); resolved from an asset path by UMaterialNodeService::ResolveGraphOwner.
  */
@@ -445,6 +483,8 @@ class FJsonObject;
  * - rename_named_reroute_declaration: Rename a declaration; usages stay linked and refresh
  * - link_named_reroute_usage: Link an existing usage node to an existing declaration node
  * - get_named_reroute_definition: One variable as JSON: its declaration, the subgraph that generates it, its inputs and consumers
+ * - promote_to_named_reroute: Turn one node output with N consumers into 1 declaration + N usages (compiled result unchanged; knots convert)
+ * - apply_reroute_readability_pass: Find high-fanout / long-wire outputs (dry run, default) or promote them all
  *
  * Material Outputs:
  * - get_output_properties: Get available material output pins
@@ -1389,6 +1429,65 @@ public:
 	static FString GetNamedRerouteDefinition(const FString& AssetPath, const FString& DeclarationName);
 
 	/**
+	 * Promote one output of a node into a named-reroute variable: create a declaration wired from that output
+	 * and replace every wire from it with a usage of the new declaration, one usage per consumer input, placed
+	 * next to its consumer. Consumers are the node inputs of this asset (function-call inputs, function outputs
+	 * and custom outputs included) and, in a Material, the material properties that read exactly this output;
+	 * the node's other outputs stay wired. The compiled result is unchanged: a usage forwards to the
+	 * declaration's input, which carries the output's component mask. A consumer whose own component mask
+	 * differs from the output's is skipped (left wired to the source, logged, not in UsageIds). A Reroute (knot)
+	 * source is converted: the declaration takes the knot's input, the knot's consumers get usages and the knot
+	 * is deleted (kept when a skipped consumer still reads it). One undo transaction; never saves.
+	 *
+	 * @param AssetPath        Full asset path to a UMaterial or UMaterialFunction
+	 * @param SourceRef        Node to promote: session id, object path or subobject name of an expression in this
+	 *                         asset (a named reroute declaration or usage is refused)
+	 * @param SourceOutputName Output pin of SourceRef ("" = first output)
+	 * @param DeclarationName  Requested variable name; "" = the suggested name (the parameter name for a
+	 *                         parameter, else "<ClassShortName>_<OutputName>"). A taken name gets a _N suffix
+	 * @return The new declaration; UsageIds = the usages that replaced consumer wires. Empty Name on failure
+	 *         (unknown asset / source / output, a named reroute source, or no consumer to rewire), nothing changed
+	 *
+	 * Example:
+	 *   info = unreal.MaterialNodeService.promote_to_named_reroute("/Game/M_Test", mul.get_name(), "", "Tint")
+	 *   print(info.name, len(info.usage_ids))
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "MaterialNode")
+	static FVibeNamedRerouteInfo PromoteToNamedReroute(
+		const FString& AssetPath,
+		const FString& SourceRef,
+		const FString& SourceOutputName = TEXT(""),
+		const FString& DeclarationName = TEXT(""));
+
+	/**
+	 * Readability pass: find every node output worth turning into a named-reroute variable and, unless
+	 * bDryRun, promote each one with promote_to_named_reroute. A candidate is one source OUTPUT whose
+	 * rewirable consumers number at least MinFanout, or whose longest wire (distance between the source's and
+	 * a consumer's editor position; a material property counts from the material's root node) is at least
+	 * MinWireLength. Skipped: named reroute declarations / usages, outputs that already feed a declaration,
+	 * constants feeding one node, and knots feeding one node. Rows are ordered by source (PosY, PosX, name),
+	 * then output index. The dry run (default) changes nothing and is the finder; an applied pass is one undo
+	 * transaction and never saves.
+	 *
+	 * @param AssetPath     Full asset path to a UMaterial or UMaterialFunction
+	 * @param bDryRun       True (default): only report candidates. False: promote each and fill bApplied/AppliedName
+	 * @param MinFanout     Fanout threshold (default 3)
+	 * @param MinWireLength Wire-length threshold in graph units (default 1500)
+	 * @return Candidates in deterministic order; empty when the asset does not resolve or nothing qualifies
+	 *
+	 * Example:
+	 *   rows = unreal.MaterialNodeService.apply_reroute_readability_pass("/Game/M_Test")   # dry run
+	 *   for r in rows: print(r.suggested_name, r.fanout, round(r.max_wire_length))
+	 *   rows = unreal.MaterialNodeService.apply_reroute_readability_pass("/Game/M_Test", False)
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "MaterialNode")
+	static TArray<FVibeRerouteCandidate> ApplyRerouteReadabilityPass(
+		const FString& AssetPath,
+		bool bDryRun = true,
+		int32 MinFanout = 3,
+		float MinWireLength = 1500.f);
+
+	/**
 	 * The single source of truth for the material outputs this service understands, as ordered
 	 * (friendly name -> EMaterialProperty) pairs. Both the writers (StringToMaterialProperty, behind
 	 * connect_expression_to_output / disconnect_output) and the reader (GetOutputConnections) are
@@ -1431,6 +1530,12 @@ private:
 	/** Recompile / refresh the graph after a mutation. Never saves. */
 	static void RefreshOwner(const FVibeMaterialGraphOwner& Owner);
 	static FVibeNamedRerouteInfo BuildNamedRerouteInfo(const FVibeMaterialGraphOwner& Owner, UMaterialExpressionNamedRerouteDeclaration* Declaration);
+	/** Body of promote_to_named_reroute without the transaction / refresh (the readability pass batches them).
+	 *  Returns the new declaration, or null with OutError set and nothing changed. */
+	static UMaterialExpressionNamedRerouteDeclaration* PromoteOwnedOutput(const FVibeMaterialGraphOwner& Owner, UMaterialExpression* Source,
+		int32 OutputIndex, const FString& DeclarationName, FString& OutError);
+	/** Default variable name for a promoted output: the parameter name, else "<ClassShortName>_<OutputName>". */
+	static FString SuggestNamedRerouteName(UMaterialExpression* Source, int32 OutputIndex);
 
 	// Shared JSON builders behind export_material_graph, export_function_graph and get_named_reroute_definition.
 	/** One node object (adds the "named_reroute" key on reroute declaration / usage nodes). */

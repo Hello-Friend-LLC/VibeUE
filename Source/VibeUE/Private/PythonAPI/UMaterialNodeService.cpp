@@ -27,6 +27,7 @@
 #include "Materials/MaterialExpressionFunctionOutput.h"
 #include "Materials/MaterialExpressionCustomOutput.h"
 #include "Materials/MaterialExpressionNamedReroute.h"
+#include "Materials/MaterialExpressionReroute.h"
 #include "Materials/MaterialFunction.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "LandscapeGrassType.h"
@@ -497,7 +498,9 @@ void UMaterialNodeService::RefreshMaterialGraph(UMaterial* Material)
 		{
 			if (IsValid(MaterialGraph))
 			{
-				MaterialGraph->LinkMaterialExpressionsFromGraph();
+				// This service mutates expressions, never graph pins, so the expressions are the source
+				// of truth: rebuild the graph from them only. LinkMaterialExpressionsFromGraph() would copy
+				// the stale pins back over every expression-level rewire (WI-1672 PromoteWithMaterialGraph).
 				MaterialGraph->RebuildGraph();
 			}
 		}
@@ -4332,4 +4335,440 @@ FString UMaterialNodeService::GetNamedRerouteDefinition(const FString& AssetPath
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
 	FJsonSerializer::Serialize(Root, Writer);
 	return OutputString;
+}
+
+// ----------------------------------------------------------------------------
+// Promote an output to a named reroute + the readability pass built on it (WI-1672 P2, DEC-6297/6298).
+// Deliberately NOT FMaterialEditor::OnConvertRerouteToNamedReroute's mechanism (knot-only, works on
+// UEdGraphPins, uses Material->MaterialGraph even for functions, stacks every usage at the knot); only its
+// invariant is kept: every usage gets Declaration AND DeclarationGuid (LinkNamedRerouteUsage).
+// ----------------------------------------------------------------------------
+
+namespace
+{
+	// One input that reads a given source output: a node input (Expression set) or, in a Material, a
+	// material property input (Expression null, Property set).
+	struct FVibeOutputConsumer
+	{
+		UMaterialExpression* Expression = nullptr;
+		FExpressionInput* Input = nullptr;
+		int32 InputIndex = INDEX_NONE;
+		int32 Property = MP_MAX;
+		int32 PosX = 0;
+		int32 PosY = 0;
+		FString SortName;
+		/** The consumer's component mask equals the output's (the only consumers promote may rewire). */
+		bool bMaskMatches = true;
+	};
+
+	bool SameComponentMask(const FExpressionInput& Input, const FExpressionOutput& Output)
+	{
+		if (Input.Mask != Output.Mask)
+		{
+			return false;
+		}
+		return Input.Mask == 0 ||
+			(Input.MaskR == Output.MaskR && Input.MaskG == Output.MaskG && Input.MaskB == Output.MaskB && Input.MaskA == Output.MaskA);
+	}
+
+	bool IsConstantExpression(const UMaterialExpression* Expression)
+	{
+		return Cast<UMaterialExpressionConstant>(Expression) || Cast<UMaterialExpressionConstant2Vector>(Expression) ||
+			Cast<UMaterialExpressionConstant3Vector>(Expression) || Cast<UMaterialExpressionConstant4Vector>(Expression);
+	}
+
+	// Every input of the owner reading exactly Source's output OutputIndex: node inputs through GetInput
+	// (FExpressionInputIterator: function-call inputs, FunctionOutput.A and CustomOutput inputs included) and, for
+	// a Material, every material property input; de-duplicated by input pointer. Other outputs of Source do not
+	// count. Sorted by (PosY, PosX, name), never by container order.
+	void CollectOutputConsumers(const FVibeMaterialGraphOwner& Owner, UMaterialExpression* Source, int32 OutputIndex, TArray<FVibeOutputConsumer>& Out)
+	{
+		Out.Reset();
+		if (!Source)
+		{
+			return;
+		}
+		const TArray<FExpressionOutput>& Outputs = Source->GetOutputs();
+		const FExpressionOutput* Output = Outputs.IsValidIndex(OutputIndex) ? &Outputs[OutputIndex] : nullptr;
+		TSet<const FExpressionInput*> Seen;
+
+		for (UMaterialExpression* Expression : Owner.Expressions())
+		{
+			if (!Expression)
+			{
+				continue;
+			}
+			for (FExpressionInputIterator It{ Expression }; It; ++It)
+			{
+				if (It->Expression != Source || It->OutputIndex != OutputIndex || Seen.Contains(It.Input))
+				{
+					continue;
+				}
+				Seen.Add(It.Input);
+				FVibeOutputConsumer& Consumer = Out.AddDefaulted_GetRef();
+				Consumer.Expression = Expression;
+				Consumer.Input = It.Input;
+				Consumer.InputIndex = It.Index;
+				Consumer.PosX = Expression->MaterialExpressionEditorX;
+				Consumer.PosY = Expression->MaterialExpressionEditorY;
+				Consumer.SortName = FString::Printf(TEXT("%s#%03d"), *Expression->GetName(), It.Index);
+				Consumer.bMaskMatches = Output && SameComponentMask(*It.Input, *Output);
+			}
+		}
+
+		if (Owner.Material)
+		{
+			for (int32 Property = 0; Property < MP_MAX; ++Property)
+			{
+				FExpressionInput* Input = Owner.Material->GetExpressionInputForProperty(static_cast<EMaterialProperty>(Property));
+				if (!Input || Input->Expression != Source || Input->OutputIndex != OutputIndex || Seen.Contains(Input))
+				{
+					continue;
+				}
+				Seen.Add(Input);
+				FVibeOutputConsumer& Consumer = Out.AddDefaulted_GetRef();
+				Consumer.Input = Input;
+				Consumer.Property = Property;
+				Consumer.PosX = Owner.Material->EditorX; // the root node
+				Consumer.PosY = Owner.Material->EditorY;
+				Consumer.SortName = FString::Printf(TEXT("~Material#%03d"), Property);
+				Consumer.bMaskMatches = Output && SameComponentMask(*Input, *Output);
+			}
+		}
+
+		Out.StableSort([](const FVibeOutputConsumer& A, const FVibeOutputConsumer& B)
+		{
+			if (A.PosY != B.PosY) return A.PosY < B.PosY;
+			if (A.PosX != B.PosX) return A.PosX < B.PosX;
+			return A.SortName < B.SortName;
+		});
+	}
+
+	FString DescribeConsumer(const FVibeOutputConsumer& Consumer)
+	{
+		if (Consumer.Expression)
+		{
+			const FName InputName = Consumer.Expression->GetInputName(Consumer.InputIndex);
+			return FString::Printf(TEXT("%s.%s"), *Consumer.Expression->GetName(),
+				InputName.IsNone() ? *FString::Printf(TEXT("Input_%d"), Consumer.InputIndex) : *InputName.ToString());
+		}
+		return FString::Printf(TEXT("material property %d"), Consumer.Property);
+	}
+}
+
+FString UMaterialNodeService::SuggestNamedRerouteName(UMaterialExpression* Source, int32 OutputIndex)
+{
+	if (!Source)
+	{
+		return FString();
+	}
+	if (Source->HasAParameterName())
+	{
+		const FName ParameterName = Source->GetParameterName();
+		if (!ParameterName.IsNone())
+		{
+			return ParameterName.ToString();
+		}
+	}
+	if (const UMaterialExpressionFunctionInput* FunctionInput = Cast<UMaterialExpressionFunctionInput>(Source))
+	{
+		if (!FunctionInput->InputName.IsNone())
+		{
+			return FunctionInput->InputName.ToString();
+		}
+	}
+	FString ClassShortName = Source->GetClass()->GetName();
+	ClassShortName.RemoveFromStart(TEXT("MaterialExpression"));
+	const TArray<FString> OutputNames = GetExpressionOutputNames(Source);
+	const FString OutputName = OutputNames.IsValidIndex(OutputIndex) ? OutputNames[OutputIndex] : FString::Printf(TEXT("Output_%d"), OutputIndex);
+	return FString::Printf(TEXT("%s_%s"), *ClassShortName, *OutputName);
+}
+
+UMaterialExpressionNamedRerouteDeclaration* UMaterialNodeService::PromoteOwnedOutput(
+	const FVibeMaterialGraphOwner& Owner, UMaterialExpression* Source, int32 OutputIndex, const FString& DeclarationName, FString& OutError)
+{
+	OutError.Reset();
+	// --- Validate everything before the first Modify(): a refused promote changes nothing. ---
+	if (!Source || !Owner.Owns(Source))
+	{
+		OutError = TEXT("the source is not an expression of this asset");
+		return nullptr;
+	}
+	if (Source->IsA<UMaterialExpressionNamedRerouteBase>())
+	{
+		OutError = FString::Printf(TEXT("%s is already a named reroute (promote its declaration's source instead)"), *Source->GetName());
+		return nullptr;
+	}
+	if (!Source->GetOutputs().IsValidIndex(OutputIndex))
+	{
+		OutError = FString::Printf(TEXT("%s has no output %d"), *Source->GetName(), OutputIndex);
+		return nullptr;
+	}
+
+	TArray<FVibeOutputConsumer> Consumers;
+	CollectOutputConsumers(Owner, Source, OutputIndex, Consumers);
+	TArray<FVibeOutputConsumer> Rewire;
+	int32 Skipped = 0;
+	for (const FVibeOutputConsumer& Consumer : Consumers)
+	{
+		if (Consumer.bMaskMatches)
+		{
+			Rewire.Add(Consumer);
+		}
+		else
+		{
+			// The usage would carry the output's mask (on the declaration's input) and the consumer's own mask
+			// would be lost; keeping both would apply a mask twice. Leave this wire to the source.
+			++Skipped;
+			UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::PromoteToNamedReroute: skipped consumer %s of %s output %d: its component mask differs from the output's (left wired to the source)"),
+				*DescribeConsumer(Consumer), *Source->GetName(), OutputIndex);
+		}
+	}
+	if (Rewire.Num() == 0)
+	{
+		OutError = Consumers.Num() == 0
+			? FString::Printf(TEXT("nothing reads %s output %d"), *Source->GetName(), OutputIndex)
+			: FString::Printf(TEXT("every consumer of %s output %d has its own component mask"), *Source->GetName(), OutputIndex);
+		return nullptr;
+	}
+
+	UMaterialExpressionReroute* Knot = Cast<UMaterialExpressionReroute>(Source);
+	const FString Name = DeclarationName.IsEmpty() ? SuggestNamedRerouteName(Source, OutputIndex) : DeclarationName;
+
+	Owner.Asset()->Modify();
+	Source->Modify();
+
+	// A converted knot is replaced in place; otherwise the declaration sits just right of its source.
+	const int32 DeclarationX = Source->MaterialExpressionEditorX + (Knot ? 0 : 200);
+	const int32 DeclarationY = Source->MaterialExpressionEditorY;
+	UMaterialExpressionNamedRerouteDeclaration* Declaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(
+		CreateOwnedExpression(Owner, UMaterialExpressionNamedRerouteDeclaration::StaticClass(), DeclarationX, DeclarationY));
+	if (!Declaration)
+	{
+		OutError = TEXT("could not create a declaration");
+		return nullptr;
+	}
+	Declaration->Modify();
+	Declaration->SubgraphExpression = Source->SubgraphExpression;
+	Declaration->SetEditableName(Name); // Name = ..., MakeNameUnique (a taken name gets _N)
+	if (Knot)
+	{
+		// The declaration takes over the knot's input, mask included (a knot forwards Input.Compile).
+		Declaration->Input.Expression = Knot->Input.Expression;
+		Declaration->Input.OutputIndex = Knot->Input.OutputIndex;
+		Declaration->Input.SetMask(Knot->Input.Mask, Knot->Input.MaskR, Knot->Input.MaskG, Knot->Input.MaskB, Knot->Input.MaskA);
+	}
+	else
+	{
+		// Connect copies the output's component mask onto the declaration's input.
+		Declaration->Input.Connect(OutputIndex, Source);
+	}
+
+	for (const FVibeOutputConsumer& Consumer : Rewire)
+	{
+		// Next to its consumer, left of it, one row per input slot so two inputs of one node never overlap.
+		const int32 Slot = Consumer.Expression ? Consumer.InputIndex : Consumer.Property;
+		UMaterialExpression* Usage = CreateOwnedExpression(Owner, UMaterialExpressionNamedRerouteUsage::StaticClass(),
+			Consumer.PosX - 180, Consumer.PosY + 32 * Slot);
+		if (!Usage || !LinkNamedRerouteUsage(Usage, Declaration))
+		{
+			if (Usage)
+			{
+				Usage->Modify();
+				if (Owner.Material)
+				{
+					Owner.Material->GetExpressionCollection().RemoveExpression(Usage);
+				}
+				else
+				{
+					Owner.Function->GetExpressionCollection().RemoveExpression(Usage);
+				}
+			}
+			++Skipped;
+			UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::PromoteToNamedReroute: could not create a usage for %s (left wired to the source)"),
+				*DescribeConsumer(Consumer));
+			continue;
+		}
+		Usage->SubgraphExpression = Consumer.Expression ? Consumer.Expression->SubgraphExpression : nullptr;
+		if (Consumer.Expression)
+		{
+			Consumer.Expression->Modify();
+		}
+		// Connect(0, Usage) resets the consumer's mask: the output's mask now lives on the declaration's input.
+		Consumer.Input->Connect(0, Usage);
+	}
+
+	if (Knot)
+	{
+		if (Skipped == 0)
+		{
+			Knot->Modify();
+			if (Owner.Material)
+			{
+				UMaterialEditingLibrary::DeleteMaterialExpression(Owner.Material, Knot);
+			}
+			else
+			{
+				UMaterialEditingLibrary::DeleteMaterialExpressionInFunction(Owner.Function, Knot);
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("UMaterialNodeService::PromoteToNamedReroute: kept knot %s: %d skipped consumer(s) still read it"),
+				*Knot->GetName(), Skipped);
+		}
+	}
+	return Declaration;
+}
+
+FVibeNamedRerouteInfo UMaterialNodeService::PromoteToNamedReroute(
+	const FString& AssetPath,
+	const FString& SourceRef,
+	const FString& SourceOutputName,
+	const FString& DeclarationName)
+{
+	FVibeNamedRerouteInfo Failed;
+	FVibeMaterialGraphOwner Owner;
+	if (!ResolveGraphOwner(AssetPath, Owner, TEXT("PromoteToNamedReroute")))
+	{
+		return Failed;
+	}
+	UMaterialExpression* Source = FindOwnedExpression(Owner, SourceRef);
+	if (!Source)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::PromoteToNamedReroute: source '%s' is not an expression of '%s'"), *SourceRef, *AssetPath);
+		return Failed;
+	}
+	const int32 OutputIndex = FindOutputIndexByName(Source, SourceOutputName);
+	if (OutputIndex < 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::PromoteToNamedReroute: output '%s' not found on %s"),
+			*SourceOutputName, *Source->GetClass()->GetName());
+		return Failed;
+	}
+
+	FScopedTransaction Transaction(NSLOCTEXT("MaterialNodeService", "Promote To Named Reroute", "Promote To Named Reroute"));
+	FString Error;
+	UMaterialExpressionNamedRerouteDeclaration* Declaration = PromoteOwnedOutput(Owner, Source, OutputIndex, DeclarationName, Error);
+	if (!Declaration)
+	{
+		Transaction.Cancel();
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::PromoteToNamedReroute: %s in '%s'"), *Error, *AssetPath);
+		return Failed;
+	}
+	RefreshOwner(Owner);
+	return BuildNamedRerouteInfo(Owner, Declaration);
+}
+
+TArray<FVibeRerouteCandidate> UMaterialNodeService::ApplyRerouteReadabilityPass(
+	const FString& AssetPath,
+	bool bDryRun,
+	int32 MinFanout,
+	float MinWireLength)
+{
+	TArray<FVibeRerouteCandidate> Result;
+	FVibeMaterialGraphOwner Owner;
+	if (!ResolveGraphOwner(AssetPath, Owner, TEXT("ApplyRerouteReadabilityPass")))
+	{
+		return Result;
+	}
+
+	struct FFound
+	{
+		UMaterialExpression* Source = nullptr;
+		int32 OutputIndex = 0;
+		FVibeRerouteCandidate Row;
+	};
+	TArray<FFound> Found;
+	TArray<FVibeOutputConsumer> Consumers;
+	for (UMaterialExpression* Source : Owner.Expressions())
+	{
+		if (!Source || Source->IsA<UMaterialExpressionNamedRerouteBase>())
+		{
+			continue;
+		}
+		const bool bSingleUseSkippable = IsConstantExpression(Source) || Source->IsA<UMaterialExpressionReroute>();
+		const int32 NumOutputs = Source->GetOutputs().Num();
+		for (int32 OutputIndex = 0; OutputIndex < NumOutputs; ++OutputIndex)
+		{
+			CollectOutputConsumers(Owner, Source, OutputIndex, Consumers);
+			bool bFeedsDeclaration = false;
+			int32 Fanout = 0;
+			double MaxWireLength = 0.0;
+			for (const FVibeOutputConsumer& Consumer : Consumers)
+			{
+				bFeedsDeclaration |= Consumer.Expression && Consumer.Expression->IsA<UMaterialExpressionNamedRerouteDeclaration>();
+				if (!Consumer.bMaskMatches)
+				{
+					continue; // promote would leave it wired; it is not part of the candidate
+				}
+				++Fanout;
+				MaxWireLength = FMath::Max(MaxWireLength, FVector2D::Distance(
+					FVector2D(Source->MaterialExpressionEditorX, Source->MaterialExpressionEditorY), FVector2D(Consumer.PosX, Consumer.PosY)));
+			}
+			// An output that already feeds a declaration is a variable already; a constant or knot feeding one
+			// node gains nothing from a name.
+			if (bFeedsDeclaration || Fanout == 0 || (bSingleUseSkippable && Fanout == 1))
+			{
+				continue;
+			}
+			if (Fanout < MinFanout && MaxWireLength < MinWireLength)
+			{
+				continue;
+			}
+			FFound& Entry = Found.AddDefaulted_GetRef();
+			Entry.Source = Source;
+			Entry.OutputIndex = OutputIndex;
+			Entry.Row.SourceId = GetExpressionId(Source);
+			const TArray<FString> OutputNames = GetExpressionOutputNames(Source);
+			Entry.Row.SourceOutputName = OutputNames.IsValidIndex(OutputIndex) ? OutputNames[OutputIndex] : FString();
+			Entry.Row.Fanout = Fanout;
+			Entry.Row.MaxWireLength = static_cast<float>(MaxWireLength);
+			Entry.Row.SuggestedName = SuggestNamedRerouteName(Source, OutputIndex);
+		}
+	}
+
+	Found.StableSort([](const FFound& A, const FFound& B)
+	{
+		if (A.Source->MaterialExpressionEditorY != B.Source->MaterialExpressionEditorY) return A.Source->MaterialExpressionEditorY < B.Source->MaterialExpressionEditorY;
+		if (A.Source->MaterialExpressionEditorX != B.Source->MaterialExpressionEditorX) return A.Source->MaterialExpressionEditorX < B.Source->MaterialExpressionEditorX;
+		if (A.Source != B.Source) return A.Source->GetName() < B.Source->GetName();
+		return A.OutputIndex < B.OutputIndex;
+	});
+
+	if (!bDryRun && Found.Num() > 0)
+	{
+		FScopedTransaction Transaction(NSLOCTEXT("MaterialNodeService", "Apply Reroute Readability Pass", "Apply Reroute Readability Pass"));
+		int32 Applied = 0;
+		for (FFound& Entry : Found)
+		{
+			FString Error;
+			// Consumers are re-collected per promote, so an earlier promote's rewires are seen.
+			if (UMaterialExpressionNamedRerouteDeclaration* Declaration = PromoteOwnedOutput(Owner, Entry.Source, Entry.OutputIndex, Entry.Row.SuggestedName, Error))
+			{
+				Entry.Row.bApplied = true;
+				Entry.Row.AppliedName = Declaration->Name.ToString();
+				++Applied;
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::ApplyRerouteReadabilityPass: %s not promoted: %s"), *Entry.Row.SuggestedName, *Error);
+			}
+		}
+		if (Applied > 0)
+		{
+			RefreshOwner(Owner);
+		}
+		else
+		{
+			Transaction.Cancel();
+		}
+	}
+
+	Result.Reserve(Found.Num());
+	for (FFound& Entry : Found)
+	{
+		Result.Add(MoveTemp(Entry.Row));
+	}
+	return Result;
 }
