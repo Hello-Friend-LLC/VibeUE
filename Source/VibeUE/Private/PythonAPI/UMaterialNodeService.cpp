@@ -3722,3 +3722,419 @@ bool UMaterialNodeService::LinkNamedRerouteUsage(UMaterialExpression* Usage, UMa
 	RerouteUsage->MarkPackageDirty();
 	return true;
 }
+
+// ----------------------------------------------------------------------------
+// Graph-owner helpers (DEC-6297): shared by every named-reroute call below. They address a
+// Material OR a MaterialFunction through the asset's own expression list, never through
+// ListExpressions / FindExpressionById (Material-only, and the latter reaches expressions
+// inside referenced functions).
+// ----------------------------------------------------------------------------
+
+UObject* FVibeMaterialGraphOwner::Asset() const
+{
+	return Material ? static_cast<UObject*>(Material) : static_cast<UObject*>(Function);
+}
+
+TConstArrayView<TObjectPtr<UMaterialExpression>> FVibeMaterialGraphOwner::Expressions() const
+{
+	if (Material)
+	{
+		return Material->GetExpressions();
+	}
+	if (Function)
+	{
+		return Function->GetExpressions();
+	}
+	return TConstArrayView<TObjectPtr<UMaterialExpression>>();
+}
+
+bool FVibeMaterialGraphOwner::Owns(const UMaterialExpression* Expression) const
+{
+	if (!Expression)
+	{
+		return false;
+	}
+	for (const TObjectPtr<UMaterialExpression>& Candidate : Expressions())
+	{
+		if (Candidate == Expression)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool UMaterialNodeService::ResolveGraphOwner(const FString& AssetPath, FVibeMaterialGraphOwner& OutOwner, const TCHAR* Caller)
+{
+	OutOwner = FVibeMaterialGraphOwner();
+
+	UObject* Loaded = AssetPath.IsEmpty() ? nullptr : UEditorAssetLibrary::LoadAsset(AssetPath);
+	if (!Loaded && !AssetPath.IsEmpty())
+	{
+		Loaded = LoadObject<UObject>(nullptr, *AssetPath, nullptr, LOAD_NoWarn | LOAD_Quiet);
+	}
+	OutOwner.Material = Cast<UMaterial>(Loaded);
+	if (!OutOwner.Material)
+	{
+		OutOwner.Function = Cast<UMaterialFunction>(Loaded);
+	}
+	if (!OutOwner.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::%s: '%s' is not a material or material function"), Caller, *AssetPath);
+		return false;
+	}
+
+	// An expression created by MaterialEditingLibrary.create_material_expression_in_function keeps
+	// UMaterialExpression::Function null until the asset is reloaded, which silently disables
+	// MakeNameUnique and usage refresh on its named-reroute declarations. Fill the back pointer the
+	// way PostLoad does.
+	if (OutOwner.Function)
+	{
+		for (UMaterialExpression* Expression : OutOwner.Function->GetExpressions())
+		{
+			if (Expression && !Expression->Function)
+			{
+				Expression->Function = OutOwner.Function;
+			}
+		}
+	}
+	return true;
+}
+
+UMaterialExpression* UMaterialNodeService::FindOwnedExpression(const FVibeMaterialGraphOwner& Owner, const FString& Ref)
+{
+	if (Ref.IsEmpty())
+	{
+		return nullptr;
+	}
+	for (UMaterialExpression* Expression : Owner.Expressions())
+	{
+		if (!Expression)
+		{
+			continue;
+		}
+		if (GetExpressionId(Expression) == Ref || Expression->GetPathName() == Ref || Expression->GetName() == Ref)
+		{
+			return Expression;
+		}
+	}
+	return nullptr;
+}
+
+UMaterialExpressionNamedRerouteDeclaration* UMaterialNodeService::FindDeclarationByName(
+	const FVibeMaterialGraphOwner& Owner, const FString& Name, FString& OutError)
+{
+	OutError.Reset();
+	if (Name.IsEmpty())
+	{
+		OutError = TEXT("declaration name is empty");
+		return nullptr;
+	}
+
+	const FName WantedName(*Name);
+	UMaterialExpressionNamedRerouteDeclaration* Found = nullptr;
+	int32 Matches = 0;
+	for (UMaterialExpression* Expression : Owner.Expressions())
+	{
+		UMaterialExpressionNamedRerouteDeclaration* Declaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(Expression);
+		if (Declaration && Declaration->Name == WantedName)
+		{
+			Found = Declaration;
+			++Matches;
+		}
+	}
+	if (Matches == 0)
+	{
+		OutError = FString::Printf(TEXT("no named reroute declaration called '%s'"), *Name);
+		return nullptr;
+	}
+	if (Matches > 1)
+	{
+		OutError = FString::Printf(TEXT("%d named reroute declarations are called '%s' (ambiguous)"), Matches, *Name);
+		return nullptr;
+	}
+	return Found;
+}
+
+UMaterialExpression* UMaterialNodeService::CreateOwnedExpression(const FVibeMaterialGraphOwner& Owner, UClass* ExpressionClass, int32 PosX, int32 PosY)
+{
+	UMaterialExpression* Expression = UMaterialEditingLibrary::CreateMaterialExpressionEx(
+		Owner.Material, Owner.Function, ExpressionClass, nullptr, PosX, PosY);
+	if (Expression && Owner.Function)
+	{
+		Expression->Function = Owner.Function;
+	}
+	return Expression;
+}
+
+void UMaterialNodeService::RefreshOwner(const FVibeMaterialGraphOwner& Owner)
+{
+	// Deliberately never saves (CleanupUnusedExpressions does for a function): callers and tests own
+	// the save decision.
+	if (Owner.Material)
+	{
+		RefreshMaterialGraph(Owner.Material);
+	}
+	else if (Owner.Function)
+	{
+		Owner.Function->MarkPackageDirty();
+		Owner.Function->PostEditChange();
+		UMaterialEditingLibrary::UpdateMaterialFunction(Owner.Function);
+	}
+}
+
+FVibeNamedRerouteInfo UMaterialNodeService::BuildNamedRerouteInfo(
+	const FVibeMaterialGraphOwner& Owner, UMaterialExpressionNamedRerouteDeclaration* Declaration)
+{
+	FVibeNamedRerouteInfo Info;
+	if (!Declaration)
+	{
+		return Info;
+	}
+	Info.Name = Declaration->Name.ToString();
+	Info.NodeColor = Declaration->NodeColor;
+	Info.VariableGuid = Declaration->VariableGuid.ToString(EGuidFormats::DigitsWithHyphens);
+	Info.DeclarationId = GetExpressionId(Declaration);
+	Info.DeclarationObjectPath = Declaration->GetPathName();
+	Info.PosX = Declaration->MaterialExpressionEditorX;
+	Info.PosY = Declaration->MaterialExpressionEditorY;
+	if (UMaterialExpression* Source = Declaration->Input.Expression)
+	{
+		Info.SourceId = GetExpressionId(Source);
+		const TArray<FExpressionOutput>& SourceOutputs = Source->GetOutputs();
+		if (SourceOutputs.IsValidIndex(Declaration->Input.OutputIndex))
+		{
+			Info.SourceOutputName = SourceOutputs[Declaration->Input.OutputIndex].OutputName.ToString();
+		}
+	}
+	for (UMaterialExpression* Expression : Owner.Expressions())
+	{
+		const UMaterialExpressionNamedRerouteUsage* Usage = Cast<UMaterialExpressionNamedRerouteUsage>(Expression);
+		if (Usage && Usage->Declaration == Declaration)
+		{
+			Info.UsageIds.Add(GetExpressionId(Expression));
+		}
+	}
+	return Info;
+}
+
+FVibeNamedRerouteList UMaterialNodeService::ListNamedReroutes(const FString& AssetPath)
+{
+	FVibeNamedRerouteList Result;
+	FVibeMaterialGraphOwner Owner;
+	if (!ResolveGraphOwner(AssetPath, Owner, TEXT("ListNamedReroutes")))
+	{
+		return Result;
+	}
+
+	// One pass over the owner's own expressions: declarations first (keeps graph order), then usages
+	// bucketed by declaration pointer.
+	TMap<const UMaterialExpressionNamedRerouteDeclaration*, int32> DeclarationIndex;
+	for (UMaterialExpression* Expression : Owner.Expressions())
+	{
+		if (UMaterialExpressionNamedRerouteDeclaration* Declaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(Expression))
+		{
+			FVibeNamedRerouteInfo Info = BuildNamedRerouteInfo(Owner, Declaration);
+			Info.UsageIds.Reset(); // filled below in the same pass as the broken check
+			DeclarationIndex.Add(Declaration, Result.Declarations.Add(MoveTemp(Info)));
+		}
+	}
+	for (UMaterialExpression* Expression : Owner.Expressions())
+	{
+		const UMaterialExpressionNamedRerouteUsage* Usage = Cast<UMaterialExpressionNamedRerouteUsage>(Expression);
+		if (!Usage)
+		{
+			continue;
+		}
+		// (IsDeclarationValid() is not exported from Engine; IsValid() is what it wraps.)
+		const UMaterialExpressionNamedRerouteDeclaration* UsageDeclaration = Usage->Declaration;
+		const int32* Index = IsValid(UsageDeclaration) ? DeclarationIndex.Find(UsageDeclaration) : nullptr;
+		if (Index)
+		{
+			Result.Declarations[*Index].UsageIds.Add(GetExpressionId(Expression));
+		}
+		else
+		{
+			Result.BrokenUsageIds.Add(GetExpressionId(Expression));
+		}
+	}
+	return Result;
+}
+
+FVibeNamedRerouteInfo UMaterialNodeService::CreateNamedRerouteDeclaration(
+	const FString& AssetPath,
+	const FString& Name,
+	const FLinearColor& NodeColor,
+	int32 PosX,
+	int32 PosY,
+	const FString& SourceRef,
+	const FString& SourceOutputName)
+{
+	FVibeNamedRerouteInfo Failed;
+	FVibeMaterialGraphOwner Owner;
+	if (!ResolveGraphOwner(AssetPath, Owner, TEXT("CreateNamedRerouteDeclaration")))
+	{
+		return Failed;
+	}
+	if (Name.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::CreateNamedRerouteDeclaration: Name is empty"));
+		return Failed;
+	}
+
+	// Validate the optional source BEFORE creating anything, so a bad ref leaves the graph untouched.
+	UMaterialExpression* Source = nullptr;
+	int32 SourceOutputIndex = INDEX_NONE;
+	if (!SourceRef.IsEmpty())
+	{
+		Source = FindOwnedExpression(Owner, SourceRef);
+		if (!Source)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::CreateNamedRerouteDeclaration: source '%s' is not an expression of '%s'"),
+				*SourceRef, *AssetPath);
+			return Failed;
+		}
+		SourceOutputIndex = FindOutputIndexByName(Source, SourceOutputName);
+		if (SourceOutputIndex < 0)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::CreateNamedRerouteDeclaration: output '%s' not found on %s"),
+				*SourceOutputName, *Source->GetClass()->GetName());
+			return Failed;
+		}
+	}
+
+	FScopedTransaction Transaction(NSLOCTEXT("MaterialNodeService", "Create Named Reroute Declaration", "Create Named Reroute Declaration"));
+	Owner.Asset()->Modify();
+
+	UMaterialExpressionNamedRerouteDeclaration* Declaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(
+		CreateOwnedExpression(Owner, UMaterialExpressionNamedRerouteDeclaration::StaticClass(), PosX, PosY));
+	if (!Declaration)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::CreateNamedRerouteDeclaration: could not create a declaration in '%s'"), *AssetPath);
+		return Failed;
+	}
+	Declaration->Modify();
+	Declaration->NodeColor = NodeColor;
+	Declaration->SetEditableName(Name); // Name = ..., MakeNameUnique (a taken name gets _N)
+	if (Source)
+	{
+		Source->Modify();
+		Declaration->Input.Connect(SourceOutputIndex, Source);
+	}
+
+	RefreshOwner(Owner);
+	return BuildNamedRerouteInfo(Owner, Declaration);
+}
+
+FString UMaterialNodeService::CreateNamedRerouteUsage(
+	const FString& AssetPath,
+	const FString& DeclarationName,
+	int32 PosX,
+	int32 PosY,
+	const FString& TargetRef,
+	const FString& TargetInputName)
+{
+	FVibeMaterialGraphOwner Owner;
+	if (!ResolveGraphOwner(AssetPath, Owner, TEXT("CreateNamedRerouteUsage")))
+	{
+		return FString();
+	}
+
+	FString Error;
+	UMaterialExpressionNamedRerouteDeclaration* Declaration = FindDeclarationByName(Owner, DeclarationName, Error);
+	if (!Declaration)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::CreateNamedRerouteUsage: %s in '%s'"), *Error, *AssetPath);
+		return FString();
+	}
+
+	// Validate the optional consumer BEFORE creating anything.
+	UMaterialExpression* Target = nullptr;
+	FExpressionInput* TargetInput = nullptr;
+	if (!TargetRef.IsEmpty())
+	{
+		Target = FindOwnedExpression(Owner, TargetRef);
+		if (!Target)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::CreateNamedRerouteUsage: target '%s' is not an expression of '%s'"),
+				*TargetRef, *AssetPath);
+			return FString();
+		}
+		TargetInput = TargetInputName.IsEmpty() ? Target->GetInput(0) : FindInputByName(Target, TargetInputName);
+		if (!TargetInput)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::CreateNamedRerouteUsage: input '%s' not found on %s"),
+				*TargetInputName, *Target->GetClass()->GetName());
+			return FString();
+		}
+	}
+
+	FScopedTransaction Transaction(NSLOCTEXT("MaterialNodeService", "Create Named Reroute Usage", "Create Named Reroute Usage"));
+	Owner.Asset()->Modify();
+
+	UMaterialExpression* Usage = CreateOwnedExpression(Owner, UMaterialExpressionNamedRerouteUsage::StaticClass(), PosX, PosY);
+	if (!Usage || !LinkNamedRerouteUsage(Usage, Declaration))
+	{
+		if (Usage)
+		{
+			// Do not leave an unlinked usage behind.
+			Usage->Modify();
+			if (Owner.Material)
+			{
+				Owner.Material->GetExpressionCollection().RemoveExpression(Usage);
+			}
+			else
+			{
+				Owner.Function->GetExpressionCollection().RemoveExpression(Usage);
+			}
+		}
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::CreateNamedRerouteUsage: could not create / link a usage of '%s' in '%s'"),
+			*DeclarationName, *AssetPath);
+		return FString();
+	}
+
+	if (Target && TargetInput)
+	{
+		Target->Modify();
+		TargetInput->Connect(0, Usage);
+	}
+
+	RefreshOwner(Owner);
+	return GetExpressionId(Usage);
+}
+
+FString UMaterialNodeService::RenameNamedRerouteDeclaration(
+	const FString& AssetPath,
+	const FString& DeclarationName,
+	const FString& NewName)
+{
+	FVibeMaterialGraphOwner Owner;
+	if (!ResolveGraphOwner(AssetPath, Owner, TEXT("RenameNamedRerouteDeclaration")))
+	{
+		return FString();
+	}
+	if (NewName.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::RenameNamedRerouteDeclaration: NewName is empty"));
+		return FString();
+	}
+
+	FString Error;
+	UMaterialExpressionNamedRerouteDeclaration* Declaration = FindDeclarationByName(Owner, DeclarationName, Error);
+	if (!Declaration)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UMaterialNodeService::RenameNamedRerouteDeclaration: %s in '%s'"), *Error, *AssetPath);
+		return FString();
+	}
+
+	FScopedTransaction Transaction(NSLOCTEXT("MaterialNodeService", "Rename Named Reroute Declaration", "Rename Named Reroute Declaration"));
+	Owner.Asset()->Modify();
+	Declaration->Modify();
+
+	// SetEditableName sets Name, runs MakeNameUnique and reconstructs every linked usage graph node.
+	// Usages reference the declaration by pointer, so none of them needs relinking.
+	Declaration->SetEditableName(NewName);
+
+	RefreshOwner(Owner);
+	return Declaration->Name.ToString();
+}

@@ -302,8 +302,90 @@ struct FBatchCreateDescriptor
 };
 
 /**
+ * One named-reroute declaration ("graph variable") in a Material or MaterialFunction, with the usages
+ * linked to it. Durable keys are Name and VariableGuid; the ids are session-specific
+ * ("<Class>_<pointer>") and must not be compared across an editor reload.
+ */
+USTRUCT(BlueprintType)
+struct FVibeNamedRerouteInfo
+{
+	GENERATED_BODY()
+
+	/** Final declaration name (after MakeNameUnique; may carry a _N suffix). */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	FString Name;
+
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	FLinearColor NodeColor = FLinearColor::White;
+
+	/** The declaration's VariableGuid as a string (survives rename; Python cannot read the raw property). */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	FString VariableGuid;
+
+	/** Session id of the declaration expression. */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	FString DeclarationId;
+
+	/** Object path of the declaration expression (durable; also accepted as a node ref). */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	FString DeclarationObjectPath;
+
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	int32 PosX = 0;
+
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	int32 PosY = 0;
+
+	/** Session id of the expression wired into the declaration's input (empty when unwired). */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	FString SourceId;
+
+	/** Name of the source expression's output pin feeding the declaration (empty when unwired). */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	FString SourceOutputName;
+
+	/** Session ids of every usage linked to this declaration. */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	TArray<FString> UsageIds;
+};
+
+/**
+ * Result of list_named_reroutes: every declaration of one Material / MaterialFunction plus the
+ * usages whose declaration is missing or invalid.
+ */
+USTRUCT(BlueprintType)
+struct FVibeNamedRerouteList
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	TArray<FVibeNamedRerouteInfo> Declarations;
+
+	/** Session ids of usages whose Declaration is null, deleted or not in this asset. */
+	UPROPERTY(BlueprintReadWrite, Category = "MaterialNode")
+	TArray<FString> BrokenUsageIds;
+};
+
+/**
+ * The graph a named-reroute call operates on: exactly one of Material / Function is set. Plain C++
+ * (not reflected); resolved from an asset path by UMaterialNodeService::ResolveGraphOwner.
+ */
+struct FVibeMaterialGraphOwner
+{
+	UMaterial* Material = nullptr;
+	UMaterialFunction* Function = nullptr;
+
+	bool IsValid() const { return Material != nullptr || Function != nullptr; }
+	UObject* Asset() const;
+	TConstArrayView<TObjectPtr<UMaterialExpression>> Expressions() const;
+	bool Owns(const UMaterialExpression* Expression) const;
+};
+
+class UMaterialExpressionNamedRerouteDeclaration;
+
+/**
  * Material Node Service - Python API for material graph manipulation
- * 
+ *
  * Provides 37 material node management actions:
  * 
  * Discovery:
@@ -355,6 +437,13 @@ struct FBatchCreateDescriptor
  * Layout:
  * - layout_expressions: Auto-arrange all nodes in a clean left-to-right flow
  * 
+ * Named reroutes (graph variables; Material or MaterialFunction, addressed by AssetPath):
+ * - list_named_reroutes: Every declaration with its linked usages, plus broken usages
+ * - create_named_reroute_declaration: Create a declaration (optionally wired from a source node)
+ * - create_named_reroute_usage: Create a usage linked to a declaration by name (optionally wired into a node input)
+ * - rename_named_reroute_declaration: Rename a declaration; usages stay linked and refresh
+ * - link_named_reroute_usage: Link an existing usage node to an existing declaration node
+ *
  * Material Outputs:
  * - get_output_properties: Get available material output pins
  * - get_output_connections: Get current output connections
@@ -1183,6 +1272,97 @@ public:
 	static bool LinkNamedRerouteUsage(UMaterialExpression* Usage, UMaterialExpression* Declaration);
 
 	/**
+	 * List every named-reroute declaration ("graph variable") of a Material or MaterialFunction with the
+	 * usages linked to it, and the usages whose declaration is missing. Reads only this asset's own
+	 * expressions (never the nested expressions of functions it calls).
+	 *
+	 * @param AssetPath Full asset path to a UMaterial or UMaterialFunction
+	 * @return Declarations (name, color, VariableGuid, position, wired source, usage ids) and broken usage ids;
+	 *         empty when the asset does not resolve
+	 *
+	 * Example:
+	 *   lst = unreal.MaterialNodeService.list_named_reroutes("/Game/MF_MyLayer")
+	 *   for d in lst.declarations: print(d.name, len(d.usage_ids))
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "MaterialNode")
+	static FVibeNamedRerouteList ListNamedReroutes(const FString& AssetPath);
+
+	/**
+	 * Create a named-reroute declaration in a Material or MaterialFunction and optionally wire a node
+	 * into its input. A name that is already taken gets a _N suffix (engine MakeNameUnique); the returned
+	 * info carries the final name.
+	 *
+	 * @param AssetPath        Full asset path to a UMaterial or UMaterialFunction
+	 * @param Name             Requested variable name (must not be empty)
+	 * @param NodeColor        Graph node color (shared by all linked usages)
+	 * @param PosX             Node X position
+	 * @param PosY             Node Y position
+	 * @param SourceRef        Optional node to wire into the declaration: session id, object path or subobject
+	 *                         name of an expression in this same asset. Empty = leave unwired
+	 * @param SourceOutputName Output pin of SourceRef ("" = first output)
+	 * @return The new declaration (empty Name on failure; nothing is changed on failure)
+	 *
+	 * Example:
+	 *   info = unreal.MaterialNodeService.create_named_reroute_declaration(
+	 *       "/Game/M_Test", "Accent", unreal.LinearColor(1, 0.5, 0, 1), 0, 0, tint.get_name(), "")
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "MaterialNode")
+	static FVibeNamedRerouteInfo CreateNamedRerouteDeclaration(
+		const FString& AssetPath,
+		const FString& Name,
+		const FLinearColor& NodeColor,
+		int32 PosX,
+		int32 PosY,
+		const FString& SourceRef,
+		const FString& SourceOutputName);
+
+	/**
+	 * Create a named-reroute usage linked to the declaration called DeclarationName and optionally wire its
+	 * output into a node input. Declarations are addressed by exact name; a name that matches no declaration
+	 * (or, impossibly, two) fails without changing anything.
+	 *
+	 * @param AssetPath       Full asset path to a UMaterial or UMaterialFunction
+	 * @param DeclarationName Exact declaration name (including any _N suffix)
+	 * @param PosX            Node X position
+	 * @param PosY            Node Y position
+	 * @param TargetRef       Optional consumer node: session id, object path or subobject name of an expression
+	 *                        in this same asset (an expression of a referenced function is refused). Empty = unwired
+	 * @param TargetInputName Input pin of TargetRef to wire ("" = first input)
+	 * @return Session id of the new usage; empty on failure
+	 *
+	 * Example:
+	 *   use_id = unreal.MaterialNodeService.create_named_reroute_usage("/Game/M_Test", "Accent", 400, 0, mul.get_name(), "A")
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "MaterialNode")
+	static FString CreateNamedRerouteUsage(
+		const FString& AssetPath,
+		const FString& DeclarationName,
+		int32 PosX,
+		int32 PosY,
+		const FString& TargetRef,
+		const FString& TargetInputName);
+
+	/**
+	 * Rename a named-reroute declaration through the engine's own rename path: the name goes through
+	 * MakeNameUnique and every linked usage node is reconstructed so it shows the new name. (Python
+	 * set_editor_property("name") changes the name but does not refresh usages, which is why this call
+	 * exists.) Usages stay linked by pointer and VariableGuid is unchanged.
+	 *
+	 * @param AssetPath       Full asset path to a UMaterial or UMaterialFunction
+	 * @param DeclarationName Exact current declaration name
+	 * @param NewName         Requested new name (must not be empty)
+	 * @return Final name after MakeNameUnique; empty on failure
+	 *
+	 * Example:
+	 *   final = unreal.MaterialNodeService.rename_named_reroute_declaration("/Game/M_Test", "Accent", "Highlight")
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "MaterialNode")
+	static FString RenameNamedRerouteDeclaration(
+		const FString& AssetPath,
+		const FString& DeclarationName,
+		const FString& NewName);
+
+	/**
 	 * The single source of truth for the material outputs this service understands, as ordered
 	 * (friendly name -> EMaterialProperty) pairs. Both the writers (StringToMaterialProperty, behind
 	 * connect_expression_to_output / disconnect_output) and the reader (GetOutputConnections) are
@@ -1213,4 +1393,16 @@ private:
 	static void RefreshMaterialGraph(UMaterial* Material);
 	static FString FunctionInputTypeToString(int32 InputType);
 	static int32 StringToFunctionInputType(const FString& TypeName);
+
+	// Graph-owner helpers shared by the named-reroute calls (DEC-6297). Plain C++, not reflected.
+	/** Load a Material, else a MaterialFunction, from AssetPath; logs a warning naming Caller on failure. */
+	static bool ResolveGraphOwner(const FString& AssetPath, FVibeMaterialGraphOwner& OutOwner, const TCHAR* Caller);
+	/** Session id / object path / subobject name -> expression, only if the Owner holds it. No numeric-index form. */
+	static UMaterialExpression* FindOwnedExpression(const FVibeMaterialGraphOwner& Owner, const FString& Ref);
+	/** Exact-name lookup; zero or two-plus matches set OutError and return null. */
+	static UMaterialExpressionNamedRerouteDeclaration* FindDeclarationByName(const FVibeMaterialGraphOwner& Owner, const FString& Name, FString& OutError);
+	static UMaterialExpression* CreateOwnedExpression(const FVibeMaterialGraphOwner& Owner, UClass* ExpressionClass, int32 PosX, int32 PosY);
+	/** Recompile / refresh the graph after a mutation. Never saves. */
+	static void RefreshOwner(const FVibeMaterialGraphOwner& Owner);
+	static FVibeNamedRerouteInfo BuildNamedRerouteInfo(const FVibeMaterialGraphOwner& Owner, UMaterialExpressionNamedRerouteDeclaration* Declaration);
 };
