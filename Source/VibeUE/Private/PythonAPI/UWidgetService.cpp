@@ -2579,6 +2579,170 @@ TArray<FWidgetAnimInfo> UWidgetService::ListAnimations(const FString& WidgetPath
 	return Results;
 }
 
+namespace
+{
+	// HF M4 (WI-1832): read-back of animation tracks and keys, the inverse of add_animation_track / add_keyframe.
+	FString InterpModeToString(ERichCurveInterpMode Mode)
+	{
+		return Mode == RCIM_Constant ? TEXT("Constant") : Mode == RCIM_Cubic ? TEXT("Cubic") : TEXT("Linear");
+	}
+
+	struct FAnimTrackRef
+	{
+		FString ComponentName;
+		FString SlotName;
+		UMovieScenePropertyTrack* Track = nullptr;
+	};
+
+	TArray<FAnimTrackRef> CollectAnimationTracks(UWidgetAnimation* Animation)
+	{
+		TArray<FAnimTrackRef> Out;
+		const UMovieScene* MovieScene = Animation ? Animation->GetMovieScene() : nullptr;
+		if (!MovieScene)
+		{
+			return Out;
+		}
+		for (const FMovieSceneBinding& Binding : MovieScene->GetBindings())
+		{
+			FString ComponentName;
+			FString SlotName;
+			for (const FWidgetAnimationBinding& WidgetBinding : Animation->AnimationBindings)
+			{
+				if (WidgetBinding.AnimationGuid == Binding.GetObjectGuid())
+				{
+					ComponentName = WidgetBinding.WidgetName.ToString();
+					SlotName = WidgetBinding.SlotWidgetName.IsNone() ? FString() : WidgetBinding.SlotWidgetName.ToString();
+					break;
+				}
+			}
+			for (UMovieSceneTrack* Track : Binding.GetTracks())
+			{
+				if (UMovieScenePropertyTrack* PropertyTrack = Cast<UMovieScenePropertyTrack>(Track))
+				{
+					Out.Add({ ComponentName, SlotName, PropertyTrack });
+				}
+			}
+		}
+		return Out;
+	}
+
+	template<typename ChannelType>
+	void AppendChannelKeys(const ChannelType& Channel, const FFrameRate& TickResolution, TArray<FWidgetAnimKeyframe>& Out)
+	{
+		const TArrayView<const FFrameNumber> Times = Channel.GetTimes();
+		const auto Values = Channel.GetValues();
+		for (int32 Index = 0; Index < Times.Num(); ++Index)
+		{
+			FWidgetAnimKeyframe Key;
+			Key.Time = static_cast<float>(TickResolution.AsSeconds(Times[Index]));
+			Key.Value = FString::SanitizeFloat(Values[Index].Value);
+			Key.Interpolation = InterpModeToString(Values[Index].InterpMode);
+			Out.Add(Key);
+		}
+	}
+
+	template<typename ChannelType>
+	FString ChannelValueAt(const ChannelType& Channel, int32 Index)
+	{
+		const auto Values = Channel.GetValues();
+		return Values.IsValidIndex(Index) ? FString::SanitizeFloat(Values[Index].Value) : FString(TEXT("0.0"));
+	}
+
+	int32 CountSectionKeys(UMovieSceneSection* Section)
+	{
+		if (const UMovieSceneFloatSection* Float = Cast<UMovieSceneFloatSection>(Section))
+		{
+			return Float->GetChannel().GetNumKeys();
+		}
+		if (const UMovieSceneColorSection* Color = Cast<UMovieSceneColorSection>(Section))
+		{
+			return Color->GetRedChannel().GetNumKeys();
+		}
+		if (const UMovieSceneMarginSection* Margin = Cast<UMovieSceneMarginSection>(Section))
+		{
+			return Margin->LeftCurve.GetNumKeys();
+		}
+		return 0;
+	}
+}
+
+TArray<FWidgetAnimTrackInfo> UWidgetService::ListAnimationTracks(const FString& WidgetPath, const FString& AnimationName)
+{
+	TArray<FWidgetAnimTrackInfo> Results;
+	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(WidgetPath);
+	UWidgetAnimation* Animation = FindAnimationByName(WidgetBP, AnimationName);
+	for (const FAnimTrackRef& Ref : CollectAnimationTracks(Animation))
+	{
+		FWidgetAnimTrackInfo Info;
+		Info.ComponentName = Ref.ComponentName;
+		Info.SlotName = Ref.SlotName;
+		Info.PropertyName = Ref.Track->GetPropertyName().ToString();
+		Info.PropertyPath = Ref.Track->GetPropertyPath().ToString();
+		Info.TrackType = Ref.Track->IsA<UMovieSceneFloatTrack>() ? TEXT("Float")
+			: Ref.Track->IsA<UMovieSceneColorTrack>() ? TEXT("Color")
+			: Ref.Track->IsA<UMovieSceneMarginTrack>() ? TEXT("Margin")
+			: Ref.Track->GetClass()->GetName();
+		for (UMovieSceneSection* Section : Ref.Track->GetAllSections())
+		{
+			Info.KeyCount += CountSectionKeys(Section);
+		}
+		Results.Add(Info);
+	}
+	return Results;
+}
+
+TArray<FWidgetAnimKeyframe> UWidgetService::ListAnimationKeyframes(const FString& WidgetPath, const FString& AnimationName, const FString& ComponentName, const FString& PropertyName)
+{
+	TArray<FWidgetAnimKeyframe> Results;
+	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(WidgetPath);
+	UWidgetAnimation* Animation = FindAnimationByName(WidgetBP, AnimationName);
+	if (!Animation || !Animation->GetMovieScene())
+	{
+		return Results;
+	}
+	const FFrameRate TickResolution = Animation->GetMovieScene()->GetTickResolution();
+	for (const FAnimTrackRef& Ref : CollectAnimationTracks(Animation))
+	{
+		const bool bComponent = Ref.ComponentName.Equals(ComponentName, ESearchCase::IgnoreCase) || (!Ref.SlotName.IsEmpty() && Ref.SlotName.Equals(ComponentName, ESearchCase::IgnoreCase));
+		const bool bProperty = Ref.Track->GetPropertyPath().ToString().Equals(PropertyName, ESearchCase::IgnoreCase) || Ref.Track->GetPropertyName().ToString().Equals(PropertyName, ESearchCase::IgnoreCase);
+		if (!bComponent || !bProperty)
+		{
+			continue;
+		}
+		for (UMovieSceneSection* Section : Ref.Track->GetAllSections())
+		{
+			if (const UMovieSceneFloatSection* Float = Cast<UMovieSceneFloatSection>(Section))
+			{
+				AppendChannelKeys(Float->GetChannel(), TickResolution, Results);
+			}
+			else if (const UMovieSceneColorSection* Color = Cast<UMovieSceneColorSection>(Section))
+			{
+				const int32 First = Results.Num();
+				AppendChannelKeys(Color->GetRedChannel(), TickResolution, Results);
+				for (int32 Index = First; Index < Results.Num(); ++Index)
+				{
+					const int32 Key = Index - First;
+					Results[Index].Value = FString::Printf(TEXT("(R=%s,G=%s,B=%s,A=%s)"), *ChannelValueAt(Color->GetRedChannel(), Key), *ChannelValueAt(Color->GetGreenChannel(), Key),
+						*ChannelValueAt(Color->GetBlueChannel(), Key), *ChannelValueAt(Color->GetAlphaChannel(), Key));
+				}
+			}
+			else if (const UMovieSceneMarginSection* Margin = Cast<UMovieSceneMarginSection>(Section))
+			{
+				const int32 First = Results.Num();
+				AppendChannelKeys(Margin->LeftCurve, TickResolution, Results);
+				for (int32 Index = First; Index < Results.Num(); ++Index)
+				{
+					const int32 Key = Index - First;
+					Results[Index].Value = FString::Printf(TEXT("(Left=%s,Top=%s,Right=%s,Bottom=%s)"), *ChannelValueAt(Margin->LeftCurve, Key), *ChannelValueAt(Margin->TopCurve, Key),
+						*ChannelValueAt(Margin->RightCurve, Key), *ChannelValueAt(Margin->BottomCurve, Key));
+				}
+			}
+		}
+		break;
+	}
+	return Results;
+}
+
 bool UWidgetService::CreateAnimation(
 	const FString& WidgetPath,
 	const FString& AnimationName,

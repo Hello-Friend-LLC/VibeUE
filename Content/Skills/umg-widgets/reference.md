@@ -120,6 +120,22 @@ Returned by `list_animations()`.
 | `duration` | float | Playback duration in seconds |
 | `track_count` | int | Number of possessable property tracks |
 
+## WidgetAnimTrackInfo
+
+Returned by `list_animation_tracks(widget_path, animation_name)` (HF M4).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `component_name` | str | Animated widget (the slot's content widget for a slot track) |
+| `slot_name` | str | Slot object name for a slot track, else empty |
+| `property_name` / `property_path` | str | Track property; `property_path` is what `add_animation_track` takes |
+| `track_type` | str | `Float`, `Color`, `Margin`, or the track class name |
+| `key_count` | int | Keys on the track (red / left channel for colour / margin) |
+
+`list_animation_keyframes(widget_path, animation_name, component_name, property_name)` returns
+`WidgetAnimKeyframe` rows (`time` seconds, `value` as `add_keyframe` takes it, `interpolation`
+`Linear`/`Constant`/`Cubic`; `add_keyframe`'s `Cubic` stores an Auto-tangent key and reads back `Cubic`).
+
 ## WidgetPreviewResult
 
 Returned by `capture_preview(widget_path, width=1920, height=1080)` — note: **no output-path
@@ -210,6 +226,7 @@ unreal.WidgetService.reorder_component(path, "PlayButton", 0)
 | `add_animation_track` | `(widget_path, animation_name, component_name, property_name)` |
 | `add_keyframe` | `(widget_path, animation_name, component_name, property_name, keyframe)` |
 | `list_animations` / `remove_animation` | Manage widget animations |
+| `list_animation_tracks` / `list_animation_keyframes` | Read tracks and keys back (HF M4) |
 | `capture_preview` | `(widget_path, width=1920, height=1080)` → WidgetPreviewResult (no path arg) |
 | `is_pie_running` / `start_pie` / `stop_pie` | PIE lifecycle (`start_pie` is async) |
 | `spawn_widget_in_pie` | `(widget_path, z_order=0)` → PIEWidgetHandle |

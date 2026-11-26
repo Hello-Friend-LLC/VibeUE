@@ -465,6 +465,37 @@ struct FWidgetAnimInfo
 };
 
 /**
+ * One property track of a widget animation (HF M4, WI-1832).
+ */
+USTRUCT(BlueprintType)
+struct FWidgetAnimTrackInfo
+{
+	GENERATED_BODY()
+
+	/** Animated widget name (the slot's content widget for a slot track). */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Animation")
+	FString ComponentName;
+
+	/** Slot object name when the track animates the widget's slot; empty otherwise. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Animation")
+	FString SlotName;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Animation")
+	FString PropertyName;
+
+	/** Property path as add_animation_track takes it (e.g. RenderOpacity, ColorAndOpacity). */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Animation")
+	FString PropertyPath;
+
+	/** Float, Color, Margin or the track class name. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Animation")
+	FString TrackType;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget|Animation")
+	int32 KeyCount = 0;
+};
+
+/**
  * Result of capturing an off-screen widget preview render.
  */
 USTRUCT(BlueprintType)
@@ -987,6 +1018,27 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Widgets|Animation")
 	static TArray<FWidgetAnimInfo> ListAnimations(const FString& WidgetPath);
+
+	/**
+	 * List the property tracks of one widget animation (HF M4).
+	 * Maps to action="list_animation_tracks"
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Widgets|Animation")
+	static TArray<FWidgetAnimTrackInfo> ListAnimationTracks(
+		const FString& WidgetPath,
+		const FString& AnimationName);
+
+	/**
+	 * List the keyframes of one property track (HF M4): Time in seconds, Value as add_keyframe takes it (float text,
+	 * or (R=,G=,B=,A=) / (Left=,Top=,Right=,Bottom=) for colour and margin tracks), Interpolation Linear/Constant/Cubic.
+	 * Maps to action="list_animation_keyframes"
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Widgets|Animation")
+	static TArray<FWidgetAnimKeyframe> ListAnimationKeyframes(
+		const FString& WidgetPath,
+		const FString& AnimationName,
+		const FString& ComponentName,
+		const FString& PropertyName);
 
 	/**
 	 * Create a new widget animation.
