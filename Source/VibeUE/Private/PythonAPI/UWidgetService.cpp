@@ -2236,11 +2236,89 @@ TArray<FWidgetPropertyInfo> UWidgetService::ListProperties(
 		// Get current value
 		void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Widget);
 		Property->ExportTextItem_Direct(Info.CurrentValue, ValuePtr, nullptr, Widget, PPF_None);
+		FillPropertyDefault(Info, Property, Widget);
 
 		Properties.Add(Info);
 	}
 
 	return Properties;
+}
+
+void UWidgetService::FillPropertyDefault(FWidgetPropertyInfo& Info, FProperty* Property, UObject* Object)
+{
+	UObject* Default = (Object && Object->GetClass()) ? Object->GetClass()->GetDefaultObject() : nullptr;
+	if (!Default || !Property)
+	{
+		return;
+	}
+	const void* DefaultPtr = Property->ContainerPtrToValuePtr<void>(Default);
+	Property->ExportTextItem_Direct(Info.DefaultValue, DefaultPtr, nullptr, Default, PPF_None);
+	Info.bIsDefault = Property->Identical_InContainer(Object, Default);
+}
+
+TArray<FWidgetPropertyInfo> UWidgetService::ListSlotProperties(
+	const FString& WidgetPath,
+	const FString& ComponentName,
+	bool bEditableOnly)
+{
+	TArray<FWidgetPropertyInfo> Properties;
+
+	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(WidgetPath);
+	UWidget* Widget = WidgetBP ? FindWidgetByName(WidgetBP, ComponentName) : nullptr;
+	UPanelSlot* Slot = Widget ? Widget->Slot.Get() : nullptr;
+	if (!Slot)
+	{
+		return Properties;
+	}
+
+	// Properties declared on UPanelSlot itself (Parent, Content) are structural, not layout data
+	for (TFieldIterator<FProperty> It(Slot->GetClass()); It; ++It)
+	{
+		FProperty* Property = *It;
+		if (!Property || Property->GetOwnerClass() == UPanelSlot::StaticClass())
+		{
+			continue;
+		}
+		const bool bIsEditable = Property->HasAnyPropertyFlags(CPF_Edit);
+		if (bEditableOnly && !bIsEditable)
+		{
+			continue;
+		}
+
+		FWidgetPropertyInfo Info;
+		Info.PropertyName = Property->GetName();
+		Info.PropertyType = Property->GetCPPType();
+		Info.bIsEditable = bIsEditable;
+		Info.bIsBlueprintVisible = Property->HasAnyPropertyFlags(CPF_BlueprintVisible);
+		Info.Category = Property->GetMetaData(TEXT("Category"));
+		void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Slot);
+		Property->ExportTextItem_Direct(Info.CurrentValue, ValuePtr, nullptr, Slot, PPF_None);
+		FillPropertyDefault(Info, Property, Slot);
+		Properties.Add(Info);
+	}
+	return Properties;
+}
+
+FWidgetBlueprintInfo UWidgetService::GetWidgetBlueprintInfo(const FString& WidgetPath)
+{
+	FWidgetBlueprintInfo Result;
+	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(WidgetPath);
+	if (!WidgetBP)
+	{
+		return Result;
+	}
+	Result.bFound = true;
+	if (UPackage* Package = WidgetBP->GetPackage())
+	{
+		Result.BlueprintGuid = Package->GetPersistentGuid().ToString(EGuidFormats::Digits);
+	}
+	Result.GeneratedClassPath = WidgetBP->GeneratedClass ? WidgetBP->GeneratedClass->GetPathName() : FString();
+	Result.ParentClassPath = WidgetBP->ParentClass ? WidgetBP->ParentClass->GetPathName() : FString();
+	for (const TPair<FName, FGuid>& Pair : WidgetBP->WidgetVariableNameToGuidMap)
+	{
+		Result.VariableGuids.Add(Pair.Key.ToString(), Pair.Value.ToString(EGuidFormats::Digits));
+	}
+	return Result;
 }
 
 bool UWidgetService::SetFont(
@@ -4856,6 +4934,7 @@ TArray<FWidgetPropertyInfo> UWidgetService::CollectWidgetProperties(UWidget* Wid
 
 		void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Widget);
 		Property->ExportTextItem_Direct(Info.CurrentValue, ValuePtr, nullptr, Widget, PPF_None);
+		FillPropertyDefault(Info, Property, Widget);
 
 		Properties.Add(Info);
 	}

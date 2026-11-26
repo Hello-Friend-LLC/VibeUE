@@ -63,6 +63,42 @@ struct FWidgetPropertyInfo
 
 	UPROPERTY(BlueprintReadWrite, Category = "Widget")
 	bool bIsBlueprintVisible = true;
+
+	/** Export text of the same property on the owning class default object (M2). Filled by snapshot / list_properties / list_slot_properties. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FString DefaultValue;
+
+	/** True when the live value is identical to the class default object value (M2). */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	bool bIsDefault = false;
+};
+
+/**
+ * Identity of a Widget Blueprint (M3): the blueprint guid and the generated / parent class paths.
+ */
+USTRUCT(BlueprintType)
+struct FWidgetBlueprintInfo
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	bool bFound = false;
+
+	/** The blueprint asset's package persistent guid as Digits (UBlueprint itself carries no guid in this engine). */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FString BlueprintGuid;
+
+	/** UWidgetBlueprint::WidgetVariableNameToGuidMap: widget variable name -> guid as Digits (stable across an in-place recompile). */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	TMap<FString, FString> VariableGuids;
+
+	/** Generated class path, e.g. /Game/UI/WBP_X.WBP_X_C. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FString GeneratedClassPath;
+
+	/** Parent class path, e.g. /Script/Angelscript.LHJobCard. */
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FString ParentClassPath;
 };
 
 /**
@@ -855,6 +891,24 @@ public:
 		const FString& ComponentName,
 		bool bEditableOnly = true);
 
+	/**
+	 * List every property of a component's slot (the UPanelSlot parent-side object): name, type, current value,
+	 * class default value and bIsDefault (M1). Empty for the root widget (no slot) or an unknown component.
+	 * Maps to action="list_slot_properties"
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Widgets")
+	static TArray<FWidgetPropertyInfo> ListSlotProperties(
+		const FString& WidgetPath,
+		const FString& ComponentName,
+		bool bEditableOnly = true);
+
+	/**
+	 * Blueprint guid, generated class path and parent class path of a Widget Blueprint (M3).
+	 * Maps to action="get_widget_blueprint_info"
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Widgets")
+	static FWidgetBlueprintInfo GetWidgetBlueprintInfo(const FString& WidgetPath);
+
 	// =================================================================
 	// Font and Brush Access
 	// =================================================================
@@ -1244,6 +1298,9 @@ private:
 
 	/** Collect all properties from a widget (all flags, not editable-only) */
 	static TArray<FWidgetPropertyInfo> CollectWidgetProperties(class UWidget* Widget);
+
+	/** Fill DefaultValue / bIsDefault of Info from the class default object of Object (M2). */
+	static void FillPropertyDefault(FWidgetPropertyInfo& Info, class FProperty* Property, class UObject* Object);
 
 	/** Shared off-screen render path behind CapturePreview and CapturePreviewState. bLegacyOutputName writes "<WBP>.png" (capture_preview behaviour). */
 	static FWidgetPreviewResult CapturePreviewInternal(
